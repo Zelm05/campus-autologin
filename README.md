@@ -46,7 +46,7 @@ campus-autologin/
 
 | 📱 Android v1.0.1 | 💻 Windows v1.1.0 |
 | --- | --- |
-| <img src="screenshots/android_v1.0.1_main.png" width="150" alt="Android 主界面"> <img src="screenshots/android_v1.0.1_settings.png" width="150" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" width="460" alt="Windows 设置主界面"> |
+| <img src="screenshots/android_v1.0.1_main.png" width="160" alt="Android 主界面"> <img src="screenshots/android_v1.0.1_settings.png" width="160" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" width="640" alt="Windows 设置主界面"> |
 
 ## 功能 Features
 
