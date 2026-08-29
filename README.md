@@ -53,6 +53,7 @@ campus-autologin/
 - Android：账号密码仅存本机（Android Keystore 加密），唯一联网目标是校园认证网关
 - Windows：账号密码仅存本机 `config.json`，不上传任何服务器
 - 本仓库不包含任何用户个人信息与签名私钥
+- 注：都需要开启自启动，不然无法生效，Android若不想显示“监控中”通知，可关闭通知权限
 
 ## 免责声明 Disclaimer
 
