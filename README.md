@@ -44,6 +44,7 @@ campus-autologin/
 
 ## 截图 Screenshots
 
+<<<<<<< HEAD
 | 📱 Android · 主界面 | 📱 Android · 设置页 | 💻 Windows v1.1.0 |
 | --- | --- | --- |
 | <img src="screenshots/android_v1.0.1_main.png" height="320" alt="Android 主界面"> | <img src="screenshots/android_v1.0.1_settings.png" height="320" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" height="320" alt="Windows 设置主界面"> |
@@ -86,11 +87,16 @@ Python + pywebview（WebView2）桌面应用，后台守护静默运行、断线
 - 源码与打包说明见 `windows/source/README.md` 与 `windows/source/重建说明.txt`
 - 依赖：`windows/source/requirements.txt`（`pip install -r` 即可）
 - 安装包免管理员权限，支持覆盖升级
+=======
+| 📱 Android v1.0.1 | 💻 Windows v1.1.0 |
+| --- | --- |
+| <img src="screenshots/android_v1.0.1_main.png" height="295" alt="Android 主界面"> <img src="screenshots/android_v1.0.1_settings.png" height="295" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" height="295" alt="Windows 设置主界面"> |
+>>>>>>> d39d42cf7630caba87bb487ff098d7f0239f7b24
 
 ## 隐私 Privacy
 
 - Android：账号密码仅存本机（Android Keystore 加密），唯一联网目标是校园认证网关
-- Windows：账号密码仅存本机 `config.json`（混淆），不上传任何服务器
+- Windows：账号密码仅存本机 `config.json`，不上传任何服务器
 - 本仓库不包含任何用户个人信息与签名私钥
 
 ## 免责声明 Disclaimer

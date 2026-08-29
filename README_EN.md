@@ -43,6 +43,7 @@ campus-autologin/
 
 ## Screenshots
 
+<<<<<<< HEAD
 | 📱 Android · main | 📱 Android · settings | 💻 Windows v1.1.0 |
 | --- | --- | --- |
 | <img src="screenshots/android_v1.0.1_main.png" height="320" alt="Android main"> | <img src="screenshots/android_v1.0.1_settings.png" height="320" alt="Android settings"> | <img src="screenshots/windows_v1.1.0_main.png" height="320" alt="Windows main"> |
@@ -85,11 +86,16 @@ Python + pywebview (WebView2) desktop app with a silent background daemon that r
 - Source & packaging docs: `windows/source/README.md` and `windows/source/重建说明.txt`
 - Dependencies: `windows/source/requirements.txt` (`pip install -r` to reproduce)
 - Installer needs no admin rights; in-place upgrade supported
+=======
+| 📱 Android v1.0.1 | 💻 Windows v1.1.0 |
+| --- | --- |
+| <img src="screenshots/android_v1.0.1_main.png" height="295" alt="Android 主界面"> <img src="screenshots/android_v1.0.1_settings.png" height="295" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" height="295" alt="Windows 设置主界面"> |
+>>>>>>> d39d42cf7630caba87bb487ff098d7f0239f7b24
 
 ## Privacy
 
 - Android: credentials stay on-device (Android Keystore encryption); the only network target is the campus gateway
-- Windows: credentials stay in the local `config.json` (obfuscated), never uploaded
+- Windows: credentials stay in the local `config.json` , never uploaded
 - This repository contains no personal data and no signing private key
 
 ## Disclaimer
