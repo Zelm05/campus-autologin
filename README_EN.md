@@ -43,7 +43,7 @@ campus-autologin/
 
 ## Screenshots
 
-| 📱 Android v1.0.1 · main | 📱 Android v1.0.1 · settings | 💻 Windows v1.1.0 |
+| 📱 Android · main | 📱 Android · settings | 💻 Windows v1.1.0 |
 | --- | --- | --- |
 | <img src="screenshots/android_v1.0.1_main.png" height="320" alt="Android main"> | <img src="screenshots/android_v1.0.1_settings.png" height="320" alt="Android settings"> | <img src="screenshots/windows_v1.1.0_main.png" height="320" alt="Windows main"> |
 

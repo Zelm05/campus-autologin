@@ -44,7 +44,7 @@ campus-autologin/
 
 ## 截图 Screenshots
 
-| 📱 Android v1.0.1 · 主界面 | 📱 Android v1.0.1 · 设置页 | 💻 Windows v1.1.0 |
+| 📱 Android · 主界面 | 📱 Android · 设置页 | 💻 Windows v1.1.0 |
 | --- | --- | --- |
 | <img src="screenshots/android_v1.0.1_main.png" height="320" alt="Android 主界面"> | <img src="screenshots/android_v1.0.1_settings.png" height="320" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" height="320" alt="Windows 设置主界面"> |
 
