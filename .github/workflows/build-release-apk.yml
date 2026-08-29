@@ -1,6 +1,6 @@
 # 在 GitHub 托管的干净环境里构建「已签名 release APK」+ 自动发布 Release。
 # 触发：推送 v* 标签，或手动在 Actions 页面运行。
-# Release 同时包含安卓 APK 与 Windows 版发布包（来自 windows/ 目录）。
+# Release 资产：CI 构建的最新 APK + release/ 目录预置的 Windows 安装包。
 name: Build & Release
 
 on:
@@ -61,7 +61,6 @@ jobs:
           name: ${{ github.ref_name }}
           files: |
             app/build/outputs/apk/release/app-release.apk
-            windows/校园网自动登录_v1.1.0_发布包.zip
-            windows/Setup_校园网自动登录_v1.1.0.exe
+            release/Autologin_v1.1.0_x64_setup.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

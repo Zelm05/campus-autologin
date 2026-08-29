@@ -10,6 +10,7 @@ keystore*.properties
 **/build/
 /local.properties
 *.apk
+!release/*.apk
 *.aab
 captures/
 .externalNativeBuild/

@@ -6,19 +6,43 @@
 - 仓库：<https://github.com/Zelm05/campus-autologin>
 - 联系：yz050930@gmail.com
 
+## 下载 Download
+
+安装包在 [`release/`](release/) 目录，可直接下载安装：
+
+| 平台 | 文件 | 说明 |
+| --- | --- | --- |
+| Android | `release/校园网自动登录_v1.0.1_Android.apk` | 直接安装，覆盖更新保留账号密码 |
+| Windows | `release/校园网自动登录_v1.1.0_Windows安装包.exe` | 免管理员权限，支持覆盖升级 |
+
+> 新版 Android APK 也可通过 GitHub Actions 自动构建：打 `v*` 标签 → Release 页面获取。
+
 ## 项目结构 Project layout
 
 ```
 campus-autologin/
 ├── app/                    # Android 应用模块（Kotlin + Jetpack Compose）
 ├── windows/
-│   ├── source/             # Windows 桌面版源码（Python + pywebview）
-│   │   └── build/          #   打包配置（PyInstaller spec / Inno Setup / 图标）
-│   ├── Setup_校园网自动登录_v1.1.0.exe   # Windows 安装包
-│   └── 校园网自动登录_v1.1.0_发布包.zip   # Windows 发布包（含源码+打包配置）
+│   └── source/             # Windows 桌面版源码（Python + pywebview）
+│       └── build/          #   打包配置（PyInstaller spec / Inno Setup / 图标）
+├── release/                # 可下载的安装包（APK / EXE）
 ├── .github/workflows/      # CI：打 v* 标签自动构建已签名 APK 并发布 Release
+├── LICENSE                 # MIT 许可证
+├── CHANGELOG.md            # 版本记录
 └── README.md
 ```
+
+## 截图 Screenshots
+
+### Android v1.0.1
+
+| 主界面 | 设置页 |
+| --- | --- |
+| ![Android 主界面](screenshots/android_v1.0.1_main.png) | ![Android 设置页](screenshots/android_v1.0.1_settings.png) |
+
+### Windows v1.1.0
+
+![Windows 设置主界面](screenshots/windows_v1.1.0_main.png)
 
 ## 功能 Features
 
@@ -37,7 +61,7 @@ campus-autologin/
 
 - 最低 Android 7.0（API 24），Kotlin + Jetpack Compose + OkHttp
 - 下拉刷新 / 网络状态自动刷新 / 浏览器下线自动补登 / 手动下线 5 分钟冷却
-- 详见 `windows/../app` 源码注释
+- 详见 `app/` 源码注释
 
 ### 本地构建
 
@@ -49,14 +73,15 @@ gradle assembleRelease   # 产物 app/build/outputs/apk/release/app-release.apk
 ### 签名与 CI
 
 - 发布签名通过 `keystore.properties`（gitignore，不提交）引用本地 `campus_release.keystore`
-- CI（`.github/workflows/`）从仓库 Secrets 还原密钥，打 `v*` 标签自动出已签名 APK 并发布 Release（含 Windows 发布物）
+- CI（`.github/workflows/`）从仓库 Secrets 还原密钥，打 `v*` 标签自动出已签名 APK 并发布 Release
 
 ## Windows 版
 
 Python + pywebview（WebView2）桌面应用，后台守护静默运行、断线自动重连。
 
 - 源码与打包说明见 `windows/source/README.md` 与 `windows/source/重建说明.txt`
-- 安装包 `Setup_校园网自动登录_v1.1.0.exe` 免管理员权限，支持覆盖升级
+- 依赖：`windows/source/requirements.txt`（`pip install -r` 即可）
+- 安装包免管理员权限，支持覆盖升级
 
 ## 隐私 Privacy
 
@@ -64,6 +89,14 @@ Python + pywebview（WebView2）桌面应用，后台守护静默运行、断线
 - Windows：账号密码仅存本机 `config.json`（混淆），不上传任何服务器
 - 本仓库不包含任何用户个人信息与签名私钥
 
+## 免责声明 Disclaimer
+
+1. 本软件按「现状」提供，仅供**学习与个人合法用途**使用，请遵守所在学校的网络使用规定。
+2. 校园网账号、密码等数据**仅存储于本机**（Android Keystore / 本地 config.json），
+   **不会上传至任何服务器**（唯一联网目标是校园认证网关）。
+3. 因使用本软件造成的封号、断网、违规处罚等后果由使用者本人承担，与作者无关。
+4. 请勿将本软件用于任何商业用途或非法用途。
+
 ## 许可 License
 
-MIT License. 本工具仅供学习与个人合法使用，请遵守所在学校网络使用规定。
+MIT License. See [LICENSE](LICENSE).
