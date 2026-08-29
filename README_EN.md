@@ -22,13 +22,19 @@ Installers are in [`release/`](release/):
 
 ```
 campus-autologin/
+├── .github/workflows/      # CI: builds signed APK & publishes Release on v* tags
+├── .gitignore              # excludes signing keys / build outputs / wheels
 ├── app/                    # Android app (Kotlin + Jetpack Compose)
 ├── windows/
 │   └── source/             # Windows desktop app (Python + pywebview)
-│       └── build/          #   packaging config (PyInstaller spec / Inno Setup / icon)
+│       ├── app.py · campus_core.py · daemon.py · gui.py · config.json
+│       ├── requirements.txt · README.md · 使用说明.txt · 启动设置.bat · 重建说明.txt
+│       └── build/          # packaging: CampusLogin.spec · icon.ico · setup.iss · version_info.txt
 ├── release/                # downloadable installers (APK / EXE)
 ├── screenshots/            # UI screenshots for the README
-├── .github/workflows/      # CI: builds signed APK & publishes Release on v* tags
+├── build.gradle.kts        # root build script
+├── settings.gradle.kts     # Gradle settings
+├── gradle.properties       # Gradle global properties
 ├── LICENSE                 # MIT license
 ├── CHANGELOG.md            # version history
 ├── README.md               # Chinese readme
@@ -39,7 +45,7 @@ campus-autologin/
 
 | 📱 Android v1.0.1 | 💻 Windows v1.1.0 |
 | --- | --- |
-| <img src="screenshots/android_v1.0.1_main.png" width="150" alt="Android main"> <img src="screenshots/android_v1.0.1_settings.png" width="150" alt="Android settings"> | <img src="screenshots/windows_v1.1.0_main.png" width="320" alt="Windows main"> |
+| <img src="screenshots/android_v1.0.1_main.png" width="150" alt="Android main"> <img src="screenshots/android_v1.0.1_settings.png" width="150" alt="Android settings"> | <img src="screenshots/windows_v1.1.0_main.png" width="460" alt="Windows main"> |
 
 ## Features
 

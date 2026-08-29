@@ -23,13 +23,19 @@
 
 ```
 campus-autologin/
+├── .github/workflows/      # CI：打 v* 标签自动构建已签名 APK 并发布 Release
+├── .gitignore              # 排除签名密钥 / 构建产物 / wheels
 ├── app/                    # Android 应用模块（Kotlin + Jetpack Compose）
 ├── windows/
 │   └── source/             # Windows 桌面版源码（Python + pywebview）
-│       └── build/          #   打包配置（PyInstaller spec / Inno Setup / 图标）
+│       ├── app.py · campus_core.py · daemon.py · gui.py · config.json
+│       ├── requirements.txt · README.md · 使用说明.txt · 启动设置.bat · 重建说明.txt
+│       └── build/          # 打包配置：CampusLogin.spec · icon.ico · setup.iss · version_info.txt
 ├── release/                # 可下载的安装包（APK / EXE）
 ├── screenshots/            # README 界面截图
-├── .github/workflows/      # CI：打 v* 标签自动构建已签名 APK 并发布 Release
+├── build.gradle.kts        # 根构建脚本
+├── settings.gradle.kts     # Gradle 设置
+├── gradle.properties       # Gradle 全局属性
 ├── LICENSE                 # MIT 许可证
 ├── CHANGELOG.md            # 版本记录
 ├── README.md               # 本文件（中文）
@@ -40,7 +46,7 @@ campus-autologin/
 
 | 📱 Android v1.0.1 | 💻 Windows v1.1.0 |
 | --- | --- |
-| <img src="screenshots/android_v1.0.1_main.png" width="150" alt="Android 主界面"> <img src="screenshots/android_v1.0.1_settings.png" width="150" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" width="320" alt="Windows 设置主界面"> |
+| <img src="screenshots/android_v1.0.1_main.png" width="150" alt="Android 主界面"> <img src="screenshots/android_v1.0.1_settings.png" width="150" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" width="460" alt="Windows 设置主界面"> |
 
 ## 功能 Features
 
