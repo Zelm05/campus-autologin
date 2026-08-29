@@ -52,6 +52,7 @@ campus-autologin/
 - Android: credentials stay on-device (Android Keystore encryption); the only network target is the campus gateway
 - Windows: credentials stay in the local `config.json` , never uploaded
 - This repository contains no personal data and no signing private key
+- Note: All of them require auto-start to be enabled, otherwise they won't take effect. On Android, if you don't want the "Monitoring" notification to show, you can disable the notification permission
 
 ## Disclaimer
 
