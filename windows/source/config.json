@@ -1,0 +1,11 @@
+{
+  "username": "",
+  "password_b64": "",
+  "service": "互联网",
+  "interval": 15,
+  "portal_base": "http://aaa.cqust.edu.cn",
+  "probe_urls": [],
+  "max_retries": 5,
+  "retry_delay": 3,
+  "autostart": false
+}

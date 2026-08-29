@@ -1,0 +1,28 @@
+# 签名密钥与密码（含敏感信息，禁止提交）
+*.keystore
+*.jks
+keystore.properties
+keystore*.properties
+
+# 构建产物
+/build
+/.gradle
+**/build/
+/local.properties
+*.apk
+*.aab
+captures/
+.externalNativeBuild/
+.DS_Store
+
+# Python / 桌面版
+__pycache__/
+*.pyc
+# 桌面版打包配置保留（spec/icon/setup.iss），仅排除 PyInstaller 中间产物
+!windows/source/build/
+windows/source/build/stage/
+
+
+# Windows 发布物（走 GitHub Releases，不进仓库）
+windows/*.exe
+windows/*.zip

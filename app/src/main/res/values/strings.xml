@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">校园网自动登录</string>
+    <string name="notification_channel_id">auto_login_channel</string>
+    <string name="notification_channel_name">自动登录服务</string>
+</resources>

@@ -1,0 +1,6 @@
+# Windows 桌面版依赖（Python 3.13）
+# 安装：pip install -r requirements.txt
+pywebview==6.2.1
+pyinstaller==6.22.2
+pythonnet==3.1.0
+Pillow==12.3.0
