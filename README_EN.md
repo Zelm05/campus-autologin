@@ -47,49 +47,10 @@ campus-autologin/
 | --- | --- |
 | <img src="screenshots/android_v1.0.1_main.png" height="295" alt="Android 主界面"> <img src="screenshots/android_v1.0.1_settings.png" height="295" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" height="295" alt="Windows 设置主界面"> |
 
-## Features
-
-| Feature | Android | Windows |
-| --- | :---: | :---: |
-| One-tap login / logout | Yes | Yes |
-| Auto re-login on disconnect | Yes | Yes (background daemon) |
-| Start on boot | Optional | Optional |
-| Credentials stored locally, encrypted | Keystore | local config.json (obfuscated) |
-| Dual network (WiFi + 5G) | Yes (socket-level binding) | — |
-| Persistent monitor notification | Toggleable | background daemon |
-
-## Android
-
-Built for the Chongqing University of Science & Technology (Ruijie ePortal) gateway. Campus network parameters are built in.
-
-- Minimum Android 7.0 (API 24), Kotlin + Jetpack Compose + OkHttp
-- Pull-to-refresh / auto network-state refresh / re-login after browser logout / 5-min cooldown after manual logout
-- See `app/` source for details
-
-### Build locally
-
-```bash
-# JDK 17+; Android SDK (platform-34 + build-tools 34.0.0)
-gradle assembleRelease   # output: app/build/outputs/apk/release/app-release.apk
-```
-
-### Signing & CI
-
-- Release signing is configured via `keystore.properties` (gitignored, not committed) referencing a local `campus_release.keystore`
-- CI (`.github/workflows/`) restores the key from repository Secrets and builds a signed APK + Release on every `v*` tag
-
-## Windows
-
-Python + pywebview (WebView2) desktop app with a silent background daemon that reconnects on drop.
-
-- Source & packaging docs: `windows/source/README.md` and `windows/source/重建说明.txt`
-- Dependencies: `windows/source/requirements.txt` (`pip install -r` to reproduce)
-- Installer needs no admin rights; in-place upgrade supported
-
 ## Privacy
 
 - Android: credentials stay on-device (Android Keystore encryption); the only network target is the campus gateway
-- Windows: credentials stay in the local `config.json` (obfuscated), never uploaded
+- Windows: credentials stay in the local `config.json` , never uploaded
 - This repository contains no personal data and no signing private key
 
 ## Disclaimer
