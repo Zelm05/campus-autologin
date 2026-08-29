@@ -48,49 +48,10 @@ campus-autologin/
 | --- | --- |
 | <img src="screenshots/android_v1.0.1_main.png" height="295" alt="Android 主界面"> <img src="screenshots/android_v1.0.1_settings.png" height="295" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" height="295" alt="Windows 设置主界面"> |
 
-## 功能 Features
-
-| 功能 | Android | Windows |
-| --- | :---: | :---: |
-| 一键登录 / 注销 | 是 | 是 |
-| 掉线自动重连 | 是 | 是（后台守护） |
-| 开机自启 | 可选 | 可选 |
-| 账号密码本机加密存储 | Keystore 加密 | 本机 config.json 混淆 |
-| 双网卡（WiFi+5G）正常 | 是（socket 级绑定） | — |
-| 后台常驻监控通知 | 可开关 | 后台守护 |
-
-## Android 版
-
-适配重庆科技大学（锐捷 ePortal）认证网关，校园网参数已内置、无需配置。
-
-- 最低 Android 7.0（API 24），Kotlin + Jetpack Compose + OkHttp
-- 下拉刷新 / 网络状态自动刷新 / 浏览器下线自动补登 / 手动下线 5 分钟冷却
-- 详见 `app/` 源码注释
-
-### 本地构建
-
-```bash
-# JDK 17+；Android SDK（platform-34 + build-tools 34.0.0）
-gradle assembleRelease   # 产物 app/build/outputs/apk/release/app-release.apk
-```
-
-### 签名与 CI
-
-- 发布签名通过 `keystore.properties`（gitignore，不提交）引用本地 `campus_release.keystore`
-- CI（`.github/workflows/`）从仓库 Secrets 还原密钥，打 `v*` 标签自动出已签名 APK 并发布 Release
-
-## Windows 版
-
-Python + pywebview（WebView2）桌面应用，后台守护静默运行、断线自动重连。
-
-- 源码与打包说明见 `windows/source/README.md` 与 `windows/source/重建说明.txt`
-- 依赖：`windows/source/requirements.txt`（`pip install -r` 即可）
-- 安装包免管理员权限，支持覆盖升级
-
 ## 隐私 Privacy
 
 - Android：账号密码仅存本机（Android Keystore 加密），唯一联网目标是校园认证网关
-- Windows：账号密码仅存本机 `config.json`（混淆），不上传任何服务器
+- Windows：账号密码仅存本机 `config.json`，不上传任何服务器
 - 本仓库不包含任何用户个人信息与签名私钥
 
 ## 免责声明 Disclaimer
