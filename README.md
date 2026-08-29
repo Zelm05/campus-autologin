@@ -1,5 +1,7 @@
 # 校园网自动登录 Campus Auto-Login
 
+**中文** | [English](README_EN.md)
+
 > 掉线自动重连的校园网认证工具，支持 Windows 桌面端与 Android 移动端。
 > Auto-relogin campus network authenticator for Windows & Android, built for the Ruijie ePortal gateway (e.g. CQUST).
 
@@ -12,8 +14,8 @@
 
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| Android | `release/校园网自动登录_v1.0.1_Android.apk` | 直接安装，覆盖更新保留账号密码 |
-| Windows | `release/校园网自动登录_v1.1.0_Windows安装包.exe` | 免管理员权限，支持覆盖升级 |
+| Android | `release/Autologin-v1.0.1_release.apk` | 直接安装，覆盖更新保留账号密码 |
+| Windows | `release/Autologin_v1.1.0_x64_setup.exe` | 免管理员权限，支持覆盖升级 |
 
 > 新版 Android APK 也可通过 GitHub Actions 自动构建：打 `v*` 标签 → Release 页面获取。
 
@@ -26,23 +28,19 @@ campus-autologin/
 │   └── source/             # Windows 桌面版源码（Python + pywebview）
 │       └── build/          #   打包配置（PyInstaller spec / Inno Setup / 图标）
 ├── release/                # 可下载的安装包（APK / EXE）
+├── screenshots/            # README 界面截图
 ├── .github/workflows/      # CI：打 v* 标签自动构建已签名 APK 并发布 Release
 ├── LICENSE                 # MIT 许可证
 ├── CHANGELOG.md            # 版本记录
-└── README.md
+├── README.md               # 本文件（中文）
+└── README_EN.md            # English version
 ```
 
 ## 截图 Screenshots
 
-### Android v1.0.1
-
-| 主界面 | 设置页 |
+| 📱 Android v1.0.1 | 💻 Windows v1.1.0 |
 | --- | --- |
-| ![Android 主界面](screenshots/android_v1.0.1_main.png) | ![Android 设置页](screenshots/android_v1.0.1_settings.png) |
-
-### Windows v1.1.0
-
-![Windows 设置主界面](screenshots/windows_v1.1.0_main.png)
+| <img src="screenshots/android_v1.0.1_main.png" width="150" alt="Android 主界面"> <img src="screenshots/android_v1.0.1_settings.png" width="150" alt="Android 设置页"> | <img src="screenshots/windows_v1.1.0_main.png" width="320" alt="Windows 设置主界面"> |
 
 ## 功能 Features
 
