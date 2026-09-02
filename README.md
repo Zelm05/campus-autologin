@@ -14,7 +14,7 @@
 
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| Android | `release/Autologin-v1.0.1_release.apk` | 直接安装，覆盖更新保留账号密码 |
+| Android | `release/Autologin-v1.0.3_release.apk` | 直接安装，覆盖更新保留账号密码；旧版 v1.0.1 仍保留在本目录 |
 | Windows | `release/Autologin_v1.1.0_x64_setup.exe` | 免管理员权限，支持覆盖升级 |
 
 > 新版 Android APK 也可通过 GitHub Actions 自动构建：打 `v*` 标签 → Release 页面获取。

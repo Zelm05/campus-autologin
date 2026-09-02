@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -43,6 +44,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -50,6 +52,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,36 +70,73 @@ import com.campus.autologin.data.model.ConnectionState
 import com.campus.autologin.data.model.LoginResult
 import com.campus.autologin.data.model.UserInfo
 import com.campus.autologin.data.remote.CampusConfig
+import com.campus.autologin.util.ErrorText
 import com.campus.autologin.ui.viewmodel.MainViewModel
 import com.campus.autologin.ui.viewmodel.MainUiState
 import com.campus.autologin.ui.viewmodel.greetingForHour
 import java.util.Calendar
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(nav: NavController, vm: MainViewModel = viewModel()) {
     val state by vm.uiState.collectAsState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     // 每次回到主界面（含从设置页返回）都重新读取配置
     LaunchedEffect(Unit) { vm.refresh() }
 
-    // 监听网络变化：WiFi 断开/重连/能力变化时自动刷新状态，
-    // 不再需要手动下拉才能看到"未连接 / 已连接"
+    // 周期自查：浏览器下线、会话过期、别的设备顶号等"外部下线"系统回调
+    // 经常长时间不触发，这里每 30 秒主动刷一次，保证页面状态不滞后、
+    // 并让"需登录/认证"自动补登尽快发生（不显示下拉指示器）。
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30_000)
+            vm.refresh()
+        }
+    }
+
+    // 监听**所有 WiFi 网络**的变化（而不是默认网络）。
+    //
+    // 旧版本用 registerDefaultNetworkCallback，它只回调"默认网络"——
+    // 只要手机开着移动数据，未认证的校园 WiFi 永远不是默认网络，
+    // 于是 WiFi 断开/重连/认证变化全都收不到，界面状态就不刷新。
+    // 现在只关心 WiFi transport：断开 → onLost，连上 → onAvailable，
+    // 校验通过/失效 → onCapabilitiesChanged。跟移动数据开不开完全无关。
     DisposableEffect(Unit) {
-        var lastValidated: Boolean? = null
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val known = mutableSetOf<Network>()
+        var lastValidated: Boolean? = null
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                vm.refresh()
+                known += network
+                // 断网重连 = 新会话：结束"手动下线"暂停并刷新（自动登录逻辑在
+                // doRefresh 里；服务被杀时这里也能放行）
+                vm.onNetworkAvailable()
+                // WiFi 刚连上时 DHCP/DNS 可能还没就绪，会话查询会失败而误判
+                // "需登录/认证"；2 秒后再确认一次，让"已连接"尽快落定
+                scope.launch {
+                    delay(2000)
+                    vm.refresh()
+                }
             }
 
             override fun onLost(network: Network) {
+                known -= network
                 vm.refresh()
+                // WiFi 网络对象从系统移除有延迟：断开瞬间 probeState 可能还读到
+                // 残留的 WiFi，先显示"需认证"；1.5 秒后再确认一次，让"未连接"落定
+                scope.launch {
+                    delay(1500)
+                    vm.refresh()
+                }
             }
 
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                // 只在"联网校验通过"状态翻转时刷新，避免频繁回调刷屏
+                // 只关心 WiFi 网络本身，避免移动数据的能力变化来打扰
+                if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return
                 val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
                 if (lastValidated == null || validated != lastValidated) {
                     lastValidated = validated
@@ -104,9 +144,15 @@ fun MainScreen(nav: NavController, vm: MainViewModel = viewModel()) {
                 }
             }
         }
-        runCatching { cm.registerDefaultNetworkCallback(callback) }
+        runCatching {
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+            cm.registerNetworkCallback(request, callback)
+        }
         onDispose {
             runCatching { cm.unregisterNetworkCallback(callback) }
+            known.clear()
         }
     }
 
@@ -135,10 +181,12 @@ fun MainScreen(nav: NavController, vm: MainViewModel = viewModel()) {
             )
         }
     ) { padding ->
-        // 下拉刷新：刷新一次 = 重读配置 + 探测状态 + 若需登录则自动登录一次
+        // 下拉刷新：刷新一次 = 重读配置 + 探测状态 + 若需登录则自动登录一次。
+        // 指示器只反映"用户主动下拉"，中间的 StatusOrb 才反映整体 loading，
+        // 两者解耦后，自动刷新转圈时下拉手势不会被顶掉。
         PullToRefreshBox(
-            isRefreshing = state.loading,
-            onRefresh = { vm.refresh() },
+            isRefreshing = state.userRefreshing,
+            onRefresh = { vm.refresh(byUser = true) },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
@@ -152,19 +200,31 @@ fun MainScreen(nav: NavController, vm: MainViewModel = viewModel()) {
                 HeroCard(state)
 
                 Spacer(Modifier.height(14.dp))
-                InfoCard(state.userInfo)
+                // 非在线时不渲染会话信息（IP/MAC 是上一次的残留，会误导）。
+                // 免认证网络（OPEN）在网关里没有本账号会话，改显示本机网络信息。
+                InfoCard(
+                    info = when (state.connection) {
+                        ConnectionState.ONLINE -> state.userInfo
+                        ConnectionState.OPEN -> state.localNet
+                        else -> UserInfo()
+                    }
+                )
 
                 Spacer(Modifier.height(16.dp))
+                // 免认证网络（OPEN）：连上就能上网，网关里并没有本账号会话，
+                // 点登录/下线都只会失败报错，所以这里禁用并说明原因；
+                // 同时保留"强制认证"入口，万一判断有误，用户仍能手动登录。
+                val isOpen = state.connection == ConnectionState.OPEN
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
                         onClick = vm::login,
-                        enabled = !state.loading,
+                        enabled = !state.loading && !isOpen,
                         modifier = Modifier
-                            .weight(2f)
+                            .weight(if (isOpen) 1f else 2f)
                             .height(52.dp),
                         shape = RoundedCornerShape(14.dp)
                     ) {
-                        if (state.loading) {
+                        if (state.loading && !isOpen) {
                             CircularProgressIndicator(
                                 Modifier.size(18.dp),
                                 strokeWidth = 2.dp,
@@ -174,19 +234,40 @@ fun MainScreen(nav: NavController, vm: MainViewModel = viewModel()) {
                             Icon(Icons.Filled.Login, contentDescription = null)
                         }
                         Spacer(Modifier.size(8.dp))
-                        Text(if (state.connection == ConnectionState.ONLINE) "重新连接" else "立即登录")
+                        Text(
+                            when {
+                                isOpen -> "无需认证"
+                                state.connection == ConnectionState.ONLINE -> "重新连接"
+                                else -> "立即登录"
+                            }
+                        )
                     }
-                    OutlinedButton(
-                        onClick = vm::logout,
+                    // 免认证网络没有会话可注销，下线按钮直接不显示
+                    if (!isOpen) {
+                        OutlinedButton(
+                            onClick = vm::logout,
+                            enabled = !state.loading,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(52.dp),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Icon(Icons.Filled.Logout, contentDescription = null)
+                            Spacer(Modifier.size(8.dp))
+                            Text("下线")
+                        }
+                    }
+                }
+
+                // 兜底入口：万一 App 判断有误（这个网络其实需要认证），
+                // 用户仍可以手动发起一次认证，不至于彻底上不了网。
+                if (isOpen) {
+                    TextButton(
+                        onClick = vm::login,
                         enabled = !state.loading,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(52.dp),
-                        shape = RoundedCornerShape(14.dp)
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.Filled.Logout, contentDescription = null)
-                        Spacer(Modifier.size(8.dp))
-                        Text("下线")
+                        Text("判断有误？点此强制认证")
                     }
                 }
 
@@ -205,17 +286,23 @@ fun MainScreen(nav: NavController, vm: MainViewModel = viewModel()) {
 @Composable
 private fun HeroCard(state: MainUiState) {
     // 实时在线只看探测结果；userInfo.online 是旧缓存（浏览器下线后仍为 true），
-    // 若参与判定会导致状态永远卡在"已连接"
-    val online = state.connection == ConnectionState.ONLINE
+    // 若参与判定会导致状态永远卡在"已连接"。
+    // 免认证网络（OPEN）同样算已连接，只是没有校园网会话信息。
+    val online = isConnected(state.connection)
     // null 安全：greeting 有默认值但万一空串时回退到按时段再算一次
     val greeting = state.greeting.ifBlank {
         greetingForHour(Calendar.getInstance().get(Calendar.HOUR_OF_DAY))
     }
-    // null 安全：name 取自 userInfo.name → username，都为空则不渲染
-    val name = state.userInfo.name
-        .ifBlank { state.config.username }
-        .ifBlank { "" }
-        .takeIf { it.isNotBlank() }
+    // 只有在**确认在线且拿到本账号会话**时才显示姓名。
+    // 旧版本无条件用「网关返回的姓名 → 学号」兜底，于是出现过：
+    //   · 还没登录就显示 "XXX 同学"（学号是本地保存的，跟登录状态无关）；
+    //   · 断开网络 / 在校外网（只有"能上网"没有校园会话）时左上角仍挂着姓名。
+    // userInfo.online 只在网关确认会话后为 true，断网/未认证/校外网都会被清掉。
+    // 姓名属于个人信息，没连上校园网就不该露出来。
+    val name = if (online && state.userInfo.online) {
+        state.userInfo.name
+            .takeIf { it.isNotBlank() && !it.equals("null", true) }
+    } else null
 
     Column(
         modifier = Modifier
@@ -250,7 +337,7 @@ private fun HeroCard(state: MainUiState) {
         StatusOrb(state)
         Spacer(Modifier.height(12.dp))
 
-        val (title, subtitle) = statusText(state, online)
+        val (title, subtitle) = statusText(state)
         Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(2.dp))
         Text(
@@ -288,7 +375,7 @@ private fun HeroCard(state: MainUiState) {
 
 @Composable
 private fun StatusOrb(state: MainUiState) {
-    val online = state.connection == ConnectionState.ONLINE
+    val online = isConnected(state.connection)
     val loading = state.loading
 
     val ringColor = when {
@@ -355,19 +442,37 @@ private fun StatusOrb(state: MainUiState) {
     }
 }
 
-private fun statusText(state: MainUiState, online: Boolean): Pair<String, String> {
-    val svc = state.userInfo.service.ifBlank { "互联网" }
+/** ONLINE（认证过的校园网）与 OPEN（免认证网络）在界面上都算"已连接"。 */
+private fun isConnected(state: ConnectionState): Boolean =
+    state == ConnectionState.ONLINE || state == ConnectionState.OPEN
+
+private fun statusText(state: MainUiState): Pair<String, String> {
+    // 服务名来自网关会话，可能是空串或字面量 "null"，一律兜底成"互联网"
+    val svc = state.userInfo.service
+        .takeIf { it.isNotBlank() && !it.equals("null", true) }
+        ?: "互联网"
     return when {
         state.loading -> "登录中…" to "正在提交认证"
-        online -> "校园网已连接" to "服务：$svc"
-        state.connection == ConnectionState.CAPTIVE -> "需登录/认证" to "检测到校园网认证门户"
-        state.connection == ConnectionState.OFFLINE -> "未联网" to "请检查网络连接"
+        // "在线"的唯一标准是网关确认了本账号会话（有 IP），
+        // 因此 ONLINE 必然显示"校园网已连接"，不存在"已连接+空 IP/MAC"
+        state.connection == ConnectionState.ONLINE -> "校园网已连接" to "服务：$svc"
+        // 免认证网络：连上就能上网，网关里没有本账号会话（它本就不需要认证）。
+        // 同样按"已连接"展示，并说明为什么看不到会话信息。
+        state.connection == ConnectionState.OPEN -> "已连接" to "当前网络无需认证"
+        state.connection == ConnectionState.CAPTIVE ->
+            "需登录/认证" to "已连上校园网，等待认证"
+        state.connection == ConnectionState.OFFLINE ->
+            "未连接" to "没有可用的 WiFi，请先连接校园网"
         else -> "检测中" to "正在检测网络状态…"
     }
 }
 
 @Composable
 private fun InfoCard(info: UserInfo) {
+    // 防御 org.json 陷阱：JSON 字段为 null 时 optString 返回字面量 "null"，
+    // 这里统一清洗成空串（再交由 InfoRow 显示"—"）
+    fun s(raw: String): String =
+        raw.takeIf { it.isNotBlank() && !it.equals("null", true) }.orEmpty()
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -376,8 +481,9 @@ private fun InfoCard(info: UserInfo) {
         Column(Modifier.fillMaxWidth().padding(16.dp)) {
             InfoRow("校园", CampusConfig.SCHOOL_NAME.orEmpty().ifBlank { "校园" }, "🏫")
             InfoRow("网关", CampusConfig.GATEWAY.removePrefix("http://").orEmpty(), "📡")
-            InfoRow("本机 IP", info.ip.orEmpty().ifBlank { "—" }, "💻", info.wlanHex.orEmpty().ifBlank { "" })
-            if (info.mac.isNotBlank()) InfoRow("MAC 地址", info.mac, "🔗")
+            InfoRow("本机 IP", s(info.ip).ifBlank { "—" }, "💻", s(info.wlanHex).ifBlank { "" })
+            val macDisplay = s(info.mac).ifBlank { null }
+            if (macDisplay != null) InfoRow("MAC 地址", macDisplay, "🔗")
         }
     }
 }
@@ -458,13 +564,17 @@ private fun ResultCard(result: LoginResult) {
                 Text(title, color = color, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.height(4.dp))
-            Text(result.message.orEmpty().ifBlank { "（无详细信息）" }, style = MaterialTheme.typography.bodyMedium)
+            // 结果文案统一走 ErrorText，保证不会把 null / 英文错误码直接甩给用户
+            val body = result.message
+                .takeIf { it.isNotBlank() && !it.equals("null", true) }
+                ?: "（网关没有返回详细信息）"
+            Text(body, style = MaterialTheme.typography.bodyMedium)
             val detail = when (result) {
-                is LoginResult.Failure -> result.preview.orEmpty()
-                is LoginResult.Success -> result.preview.orEmpty()
-                is LoginResult.Error -> result.cause?.message.orEmpty()
-            }
-            if (detail.isNotBlank()) {
+                is LoginResult.Failure -> result.preview
+                is LoginResult.Success -> result.preview
+                is LoginResult.Error -> ErrorText.of(result.cause)
+            }.takeIf { it.isNotBlank() && !it.equals("null", true) }
+            if (detail != null) {
                 Spacer(Modifier.height(8.dp))
                 Text(
                     detail,

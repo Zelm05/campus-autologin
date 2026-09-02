@@ -3,6 +3,7 @@ package com.campus.autologin.data.remote
 import android.net.Network
 import com.campus.autologin.data.model.LoginResult
 import com.campus.autologin.data.model.UserInfo
+import com.campus.autologin.util.ErrorText
 import com.campus.autologin.util.WifiNet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -79,21 +80,26 @@ class LoginEngine {
 
             when {
                 qs != null -> doLogin(username, password, qs, net, from)
+
                 outcome is ProbeOutcome.Online -> LoginResult.Failure(
-                    "当前网络已经可以直接上网，无需认证。若手机同时开着移动数据，" +
-                        "请先关闭移动数据再点登录。",
+                    "当前网络已经可以直接上网，不需要认证。\n" +
+                        "如果你连的确实是校园 WiFi 却上不了网，多半是认证参数已经失效，" +
+                        "请关掉 WiFi 再重开、等几秒后重试。",
                     lastDiagnostics
                 )
+
                 else -> LoginResult.Failure(
-                    "没能从校园网关取到认证参数。请确认已连上校园 WiFi 后重试；" +
-                        "若手机同时开着移动数据，可先关闭移动数据再点登录。",
+                    "没能从校园网关取到认证参数。请依次确认：\n" +
+                        "1）连的是校园 WiFi，不是 4G/5G 或别的 WiFi；\n" +
+                        "2）没有开着 VPN / 代理 / 加速器；\n" +
+                        "3）若手机同时开着移动数据，可先关掉移动数据再点登录。",
                     lastDiagnostics
                 )
             }
         } catch (e: IOException) {
-            LoginResult.Error("网络请求失败：${e.message}", e)
+            LoginResult.Error(ErrorText.of(e), e)
         } catch (t: Throwable) {
-            LoginResult.Error("登录过程出错：${t.message}", t)
+            LoginResult.Error(ErrorText.of(t), t)
         }
     }
 
@@ -159,18 +165,24 @@ class LoginEngine {
 
     private fun classifyLogin(text: String): LoginResult {
         val json = runCatching { JSONObject(text) }.getOrNull()
-            ?: return LoginResult.Failure("登录响应无法解析", text.take(160))
-        return when (json.optString("result")) {
+            ?: return LoginResult.Failure(ErrorText.unparsable(text), text.take(160))
+        return when (val result = json.optString("result")) {
             "success" -> {
                 json.optString("userIndex").takeIf { it.isNotBlank() }?.let { userIndex = it }
                 LoginResult.Success("登录成功")
             }
             "fail" -> LoginResult.Failure(
-                json.optString("message").ifBlank { "登录失败" },
+                ErrorText.gateway(json.optString("message")),
                 lastDiagnostics
             )
             else -> LoginResult.Failure(
-                "登录失败（${json.optString("message").ifBlank { "未知原因" }}）",
+                // result 既不是 success 也不是 fail：把网关原话带上，避免"未知原因"这种空话
+                if (result.isBlank()) {
+                    "网关返回了没有 result 字段的响应，无法判断是否成功。"
+                } else {
+                    "网关返回了意外的 result = \"$result\"。" +
+                        ErrorText.gateway(json.optString("message"))
+                },
                 lastDiagnostics
             )
         }
@@ -181,25 +193,51 @@ class LoginEngine {
     // ------------------------------------------------------------------
     suspend fun fetchOnlineInfo(net: Network?): UserInfo? = withContext(Dispatchers.IO) {
         try {
-            val http = WifiNet.client(net, CampusConfig.TIMEOUT_MS, followRedirects = true)
+            // 用比登录更短的超时：它每次刷新都要跑一次，不在校园网时应当快速失败
+            val http = WifiNet.client(net, INFO_TIMEOUT_MS, followRedirects = true)
             val url = joinUrl(CampusConfig.GATEWAY, CampusConfig.ONLINE_INFO_PATH)
-            val body = FormBody.Builder()
-                .add(CampusConfig.USER_INDEX_FIELD, userIndex)
-                .build()
-            val request = Request.Builder().url(url).post(body).build()
+            val bodyBuilder = FormBody.Builder()
+            // userIndex 为空时也照常发查询：部分网关支持"按当前 IP 查会话"，
+            // 而"下线后重新登录"场景网关经常不回 userIndex，旧逻辑一空就永远查不到
+            if (userIndex.isNotBlank()) bodyBuilder.add(CampusConfig.USER_INDEX_FIELD, userIndex)
+            val request = Request.Builder().url(url).post(bodyBuilder.build()).build()
             val text = http.newCall(request).execute().use { it.body?.string().orEmpty() }
             val json = runCatching { JSONObject(text) }.getOrNull() ?: return@withContext null
-            val name = json.optString("userName")
-            val userId = json.optString("userId")
-            if (name.isBlank() && userId.isBlank()) return@withContext null
+            // org.json 的著名陷阱：JSON 字段是 null 时，optString 返回的是
+            // **字面量字符串 "null"**（不是 Kotlin null），所以 isBlank() 拦不住——
+            // 这里统一把 "null" 当作空值
+            fun String.clean(): String? =
+                this.takeIf { it.isNotBlank() && !it.equals("null", true) }
+            // 兼容两种字段命名（不同网关版本 userName / name / user_name）
+            val name = json.optString("userName").clean()
+                ?: json.optString("name").clean()
+                ?: json.optString("user_name").clean()
+            val userId = json.optString("userId").clean()
+                ?: json.optString("user_id").clean()
+            val ip = json.optString("userIp").clean()
+                ?: json.optString("user_ip").clean()
+            val mac = json.optString("userMac").clean()
+                ?: json.optString("user_mac").clean()
+            val service = json.optString("service").clean()
+                ?: json.optString("realServiceName").clean()
+            if (name == null && userId == null) return@withContext null
             json.optString("userIndex").takeIf { it.isNotBlank() }?.let { userIndex = it }
+            // 查询拿到了真实 IP，把它同时记为 wlanuserip 十六进制，供离线时兜底展示
+            if (ip != null) {
+                runCatching {
+                    lastWlanUserIpHex = ip.split('.')
+                        .mapNotNull { it.toIntOrNull() }
+                        .take(4)
+                        .joinToString("") { it.toString(16).padStart(2, '0') }
+                }
+            }
             UserInfo(
                 online = true,
-                name = name,
-                userId = userId,
-                ip = json.optString("userIp"),
-                mac = json.optString("userMac"),
-                service = json.optString("service").ifBlank { json.optString("realServiceName") }
+                name = name.orEmpty(),
+                userId = userId.orEmpty(),
+                ip = ip.orEmpty(),
+                mac = mac.orEmpty(),
+                service = service.orEmpty()
             )
         } catch (e: Exception) {
             null
@@ -212,7 +250,10 @@ class LoginEngine {
     suspend fun logout(index: String, net: Network?): LoginResult = withContext(Dispatchers.IO) {
         try {
             if (index.isBlank()) {
-                return@withContext LoginResult.Failure("无在线会话，无法注销")
+                return@withContext LoginResult.Failure(
+                    "当前没有记录到在线会话（可能是 App 重装过，或会话已过期），无法下线。\n" +
+                        "如果需要下线，请在浏览器打开网关自助下线，或直接断开 WiFi。"
+                )
             }
             val http = WifiNet.client(net, CampusConfig.TIMEOUT_MS, followRedirects = true)
             val url = joinUrl(CampusConfig.GATEWAY, CampusConfig.LOGOUT_PATH)
@@ -221,21 +262,30 @@ class LoginEngine {
                 .build()
             val request = Request.Builder().url(url).post(body).build()
             val text = http.newCall(request).execute().use { it.body?.string().orEmpty() }
-            val result = runCatching { JSONObject(text).optString("result") }.getOrDefault("")
-            if (result.equals("success", true)) {
-                LoginResult.Success("已注销")
+            val json = runCatching { JSONObject(text) }.getOrNull()
+            if (json == null) {
+                LoginResult.Failure(ErrorText.unparsable(text))
+            } else if (json.optString("result").equals("success", true)) {
+                LoginResult.Success("已下线")
             } else {
-                LoginResult.Failure("注销失败：${result.ifBlank { "未知响应" }}")
+                // 常见：会话已过期/根本没在线 → 网关回 fail
+                val msg = ErrorText.gateway(json.optString("message").ifBlank { "该会话已不存在" })
+                LoginResult.Failure(msg)
             }
         } catch (e: IOException) {
-            LoginResult.Error("注销请求失败：${e.message}", e)
+            LoginResult.Error(ErrorText.of(e), e)
         } catch (t: Throwable) {
-            LoginResult.Error("注销失败：${t.message}", t)
+            LoginResult.Error(ErrorText.of(t), t)
         }
     }
 
     private fun joinUrl(base: String, path: String): String {
         val b = base.trim().removeSuffix("/")
         return if (path.startsWith("/")) "$b$path" else "$b/$path"
+    }
+
+    private companion object {
+        /** 查询在线信息的超时：每次刷新都要跑，必须短，避免界面长时间转圈。 */
+        const val INFO_TIMEOUT_MS = 3_000L
     }
 }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import okhttp3.ConnectionPool
 import okhttp3.Dns
 import okhttp3.OkHttpClient
@@ -77,11 +78,17 @@ object WifiNet {
      * @param net 目标网络；null 时退化为默认网络。
      * @param timeoutMs 连接/读取超时。
      * @param followRedirects 探测时必须为 false（要读 Location），登录时可为 true。
+     * @param fallbackDns 是否允许在目标网络自身 DNS 解析失败时回退到系统 DNS。
+     *        **探测时必须为 false**：开着移动数据时，系统 DNS 走的是 4G，
+     *        会把 baidu 等解析成真实公网 IP，再经 WiFi socket 直连——
+     *        若网关只劫持域名、放行 IP 直连，就会把"未认证"误判成"已在线"。
+     *        登录/在线查询保持 true（网关域名用 4G DNS 也能解析到正确地址）。
      */
     fun client(
         net: Network?,
         timeoutMs: Long = 8_000L,
-        followRedirects: Boolean = false
+        followRedirects: Boolean = false,
+        fallbackDns: Boolean = true
     ): OkHttpClient {
         val builder = OkHttpClient.Builder()
             .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -102,11 +109,77 @@ object WifiNet {
                         net.getAllByName(hostname).filterNotNull()
                     }.getOrDefault(emptyList())
                     if (viaWifi.isNotEmpty()) return viaWifi
-                    return runCatching { Dns.SYSTEM.lookup(hostname) }.getOrDefault(emptyList())
+                    if (fallbackDns) {
+                        return runCatching { Dns.SYSTEM.lookup(hostname) }.getOrDefault(emptyList())
+                    }
+                    return emptyList()
                 }
             })
         }
         return builder.build()
+    }
+
+    // ---- 网络标识：用于记住"免认证网络" ----
+
+    /**
+     * 当前 WiFi 名称。
+     *
+     * Android 8.0+ 起读取 SSID 需要位置权限（Android 10+ 还要求打开位置开关），
+     * 没有权限时系统统一返回 "<unknown ssid>"。本 App 不申请位置权限，
+     * 所以这里通常拿到 null —— 由 [networkKey] 自动退回用网关 IP 做标识。
+     */
+    fun ssid(ctx: Context): String? {
+        val wm = ctx.getSystemService(WifiManager::class.java) ?: return null
+        @Suppress("DEPRECATION")
+        val raw = wm.connectionInfo?.ssid ?: return null
+        return raw.trim().trim('"')
+            .takeIf { it.isNotBlank() && !it.equals("<unknown ssid>", ignoreCase = true) }
+    }
+
+    /** 当前 WiFi 的网关地址（来自 DHCP）。读取网关不需要位置权限。 */
+    fun gateway(ctx: Context): String? {
+        val wm = ctx.getSystemService(WifiManager::class.java) ?: return null
+        val gw = runCatching { wm.dhcpInfo?.gateway }.getOrNull() ?: return null
+        if (gw == 0) return null
+        return formatIp(gw)
+    }
+
+    /**
+     * 记忆"免认证网络"用的网络指纹。
+     *
+     * 优先 WiFi 名称（最准确、也最符合直觉），取不到时退回网关 IP
+     * （需认证与免认证的校园网通常分属不同网段、网关不同，足以区分）。
+     * 两者都拿不到时返回 null —— 此时不记忆，每次仍由探针判定，功能不失效。
+     */
+    fun networkKey(ctx: Context): String? {
+        ssid(ctx)?.let { return "ssid:$it" }
+        gateway(ctx)?.let { return "gw:$it" }
+        return null
+    }
+
+    private fun formatIp(value: Int): String = listOf(
+        value and 0xFF,
+        value shr 8 and 0xFF,
+        value shr 16 and 0xFF,
+        value shr 24 and 0xFF
+    ).joinToString(".")
+
+    /**
+     * 设备在当前 WiFi 下的网络信息（本机 IP / MAC）。
+     *
+     * 免认证网络在网关里查不到会话，信息卡改显示设备自己拿到的地址。
+     * 注意：Android 6.0+ 起普通应用读不到真实 MAC（统一返回 02:00:00:00:00:00），
+     * 拿不到就返回空串，交给界面决定不显示该行。
+     */
+    fun localNet(ctx: Context): Pair<String, String> {
+        val wm = ctx.getSystemService(WifiManager::class.java) ?: return "" to ""
+        @Suppress("DEPRECATION")
+        val info = runCatching { wm.connectionInfo }.getOrNull() ?: return "" to ""
+        val ip = info.ipAddress.takeIf { it != 0 }?.let(::formatIp).orEmpty()
+        val mac = info.macAddress
+            ?.takeIf { it.isNotBlank() && !it.equals("02:00:00:00:00:00", ignoreCase = true) }
+            .orEmpty()
+        return ip to mac
     }
 
     /** 一行诊断串，登录失败时展示给用户，便于精确定位。 */

@@ -11,6 +11,7 @@ import com.campus.autologin.data.remote.NetworkProbe
 import com.campus.autologin.data.remote.ProbeOutcome
 import com.campus.autologin.util.WifiNet
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
@@ -29,15 +30,6 @@ class AuthRepository(context: Context) {
     fun loadConfig(): LoginConfig = prefs.loadConfig()
 
     fun getPassword(): String = prefs.getPassword()
-
-    /** App 内手动下线的时刻（毫秒时间戳），冷却期内后台不自动补登。 */
-    fun getManualLogoutAt(): Long = prefs.getManualLogoutAt()
-
-    /** 是否处于"手动下线冷却期"：App 内点下线后 5 分钟内不自动补登。 */
-    fun isInManualLogoutCooldown(): Boolean {
-        val t = prefs.getManualLogoutAt()
-        return t > 0 && System.currentTimeMillis() - t < MANUAL_LOGOUT_COOLDOWN_MS
-    }
 
     /** App 重启后引擎内存的 userIndex 会丢，从持久层同步回来，避免探测误判。 */
     private fun syncUserIndex() {
@@ -90,12 +82,16 @@ class AuthRepository(context: Context) {
             envInfo = WifiNet.describe(ctx)
         )
         if (result is LoginResult.Success) {
-            // 手动下线冷却期到此结束：登录成功即恢复自动补登
-            prefs.clearManualLogoutAt()
+            // 登录成功 = 这个网络其实是**需要认证**的：把它从免认证名单里移除。
+            // 否则下次连上会被 probeState 第 3 步直接判成"已连接"而不再登录。
+            // 与"免认证时记入名单"配合，形成双向修正：判错一次，登录成功立刻纠正。
+            WifiNet.networkKey(ctx)?.let { prefs.removeOpenNetwork(it) }
             if (engine.lastWlanUserIpHex.isNotBlank()) {
                 prefs.setWlanUserIpHex(engine.lastWlanUserIpHex)
             }
-            engine.fetchOnlineInfo(net)?.let { persistUserInfo(it) }
+            // 网关会话表有同步延迟，用重试查询把姓名/IP/服务取回来，
+            // 否则界面上会短暂显示空白（旧版本表现为 "null"）
+            fetchOnlineInfoRetry()
         }
         result
     }
@@ -109,8 +105,6 @@ class AuthRepository(context: Context) {
             prefs.clearUserInfo()
             // 内存里的 userIndex 一并清掉，避免后续探测用旧索引误判在线
             engine.userIndex = ""
-            // 记录手动下线时刻：冷却期内后台不自动补登（浏览器下线无此标记，会立即恢复）
-            prefs.setManualLogoutAt(System.currentTimeMillis())
         }
         result
     }
@@ -121,6 +115,29 @@ class AuthRepository(context: Context) {
     suspend fun fetchOnlineInfo(): UserInfo? = withContext(Dispatchers.IO) {
         syncUserIndex()
         engine.fetchOnlineInfo(WifiNet.wifi(ctx))?.also { persistUserInfo(it) }
+    }
+
+    /**
+     * 带重试的在线信息查询。
+     *
+     * 登录刚成功时，网关的在线会话表还没同步完，立刻查会拿到空响应，
+     * 于是界面上的姓名 / IP / 服务全部回落为空——这就是"自动登录成功了，
+     * 但界面上仍是一片空白（甚至显示 null）"的根因。这里做几次短间隔重试。
+     */
+    suspend fun fetchOnlineInfoRetry(
+        times: Int = 4,
+        delayMs: Long = 700L
+    ): UserInfo? = withContext(Dispatchers.IO) {
+        for (attempt in 0 until times) {
+            syncUserIndex()
+            val info = runCatching { engine.fetchOnlineInfo(WifiNet.wifi(ctx)) }.getOrNull()
+            if (info != null) {
+                persistUserInfo(info)
+                return@withContext info
+            }
+            if (attempt < times - 1) delay(delayMs)
+        }
+        null
     }
 
     private fun persistUserInfo(info: UserInfo) {
@@ -140,30 +157,81 @@ class AuthRepository(context: Context) {
         wlanHex = prefs.getUserInfoWlanHex()
     )
 
-    companion object {
-        /** App 内手动下线后，暂停自动补登的时长。 */
-        private const val MANUAL_LOGOUT_COOLDOWN_MS = 5 * 60_000L
+    /**
+     * 免认证网络下展示用的**本机**网络信息。
+     *
+     * 这类网络在网关里查不到本账号会话（它本就不需要认证），
+     * 信息卡改显示设备自己在这个 WiFi 下拿到的 IP/MAC。
+     */
+    fun localNetInfo(): UserInfo {
+        val (ip, mac) = WifiNet.localNet(ctx)
+        return UserInfo(online = false, ip = ip, mac = mac)
     }
 
     /**
-     * 判定当前连接状态。优先级：
-     *  1. 网关能查到在线会话 → ONLINE；
-     *  2. WiFi 没拿到系统"联网校验通过" → 必然需要认证（最可靠的信号）；
-     *  3. 再退回 HTTP 探针。
+     * 判定当前连接状态。
+     *
+     * 三种"能上网"的情形必须分清：
+     *  · **ONLINE**：网关确认了本账号的在线会话（有 IP）——真正认证过的校园网；
+     *  · **OPEN**：能上外网，但网关查不到本账号会话 —— 说明这是**免认证网络**。
+     *    学校有部分网络连上就能上网、从不需要 portal 登录，会话表里自然永远
+     *    查不到本账号。旧版本把它当成"需认证"，于是不断自动登录，
+     *    登录与下线全都报错；现在它显示"已连接"，且不触发自动登录；
+     *  · **CAPTIVE**：被门户拦截，确实需要认证，会自动补登。
+     *
+     * 用户明确要求：
+     *  · 不出现"已连接 + 空 IP/MAC"——查不到本账号会话就不按 ONLINE 处理；
+     *  · **任何"需登录/认证"状态都会自动补登**（已取消手动下线冷却期）；
+     *  · 没下线时断开重连，会话还在，应直接显示"已连接"——所以会话查询
+     *    必须放在最前面，不能等系统校验/探针（重连瞬间它们都还没就绪）。
+     *
+     * 判定顺序：
+     *  1. 连 WiFi 都没有 → 未连接（最快，不发请求）；
+     *  2. 先查网关会话：**有完整本账号会话（IP 非空）→ ONLINE 已连接**。
+     *     这覆盖"断网重连"：userIndex 在本地缓存里，重连后立刻能查到会话。
+     *  3. 查不到会话，但这是**记住过的免认证网络**（且系统没打门户标记）→ OPEN；
+     *  4. 系统信号（门户标记 / 未校验通过）→ 需登录；
+     *  5. 探针兜底：被劫持 → 需登录；**能上网但无会话 → OPEN 免认证**（并记住）。
      */
     suspend fun probeState(): ConnectionState = withContext(Dispatchers.IO) {
-        // 手动下线冷却期内：用户明确离线，直接判"需登录/认证"，
-        // 防止网关按 IP 匹配返回旧会话导致误判在线
-        if (isInManualLogoutCooldown()) return@withContext ConnectionState.CAPTIVE
+        // 1) 没有可用的 WiFi（关了 WiFi、不在覆盖范围、只开着移动数据）→ 未连接
         val net = WifiNet.wifi(ctx)
-        syncUserIndex()
-        if (engine.fetchOnlineInfo(net)?.online == true) return@withContext ConnectionState.ONLINE
         if (net == null) return@withContext ConnectionState.OFFLINE
+
+        // 2) 直接查网关会话。必须拿到**完整的本账号会话（IP 非空）**才算在线——
+        //    网关只回了用户名、没给 IP 也是"查不到"，一律按未认证处理。
+        syncUserIndex()
+        val info = runCatching { engine.fetchOnlineInfo(net) }.getOrNull()
+        if (info?.online == true && info.ip.isNotBlank()) {
+            persistUserInfo(info)
+            return@withContext ConnectionState.ONLINE
+        }
+
+        // 3) 记住过的免认证网络 → 连上就直接判定，跳过系统校验与探针（最快最稳）。
+        //    仍检查门户标记：万一学校后来给这个网络加了认证，系统标记会先发现，
+        //    于是继续往下走、由探针重新判定，不会被旧的记忆锁死。
+        val netKey = WifiNet.networkKey(ctx)
+        if (prefs.isOpenNetwork(netKey) && !WifiNet.hasCaptiveFlag(ctx, net)) {
+            return@withContext ConnectionState.OPEN
+        }
+
+        // 4) 系统明确打上门户标记 / 没拿到"联网校验通过" → 需登录
         if (WifiNet.hasCaptiveFlag(ctx, net)) return@withContext ConnectionState.CAPTIVE
         if (!WifiNet.isValidated(ctx, net)) return@withContext ConnectionState.CAPTIVE
+
+        // 5) 探针兜底
         when (runCatching { NetworkProbe.detect(net) }.getOrNull()) {
+            // 被劫持到门户 → 需要认证
             is ProbeOutcome.Portal -> ConnectionState.CAPTIVE
-            is ProbeOutcome.Online -> ConnectionState.ONLINE
+
+            // 能上外网，但网关查不到本账号会话 → 免认证网络，显示"已连接"。
+            // 顺手记住这个网络，下次连上走第 3 步直接判定，不用再等探针。
+            is ProbeOutcome.Online -> {
+                netKey?.let { prefs.addOpenNetwork(it) }
+                ConnectionState.OPEN
+            }
+
+            // 既没抓到门户、也证明不了能上网（DNS 不通 / 全部超时）→ 未连接
             else -> ConnectionState.OFFLINE
         }
     }

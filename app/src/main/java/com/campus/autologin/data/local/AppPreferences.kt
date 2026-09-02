@@ -87,4 +87,29 @@ class AppPreferences(context: Context) {
         .remove(Const.KEY_USER_INFO_SERVICE)
         .remove(Const.KEY_USER_INFO_WLAN_HEX)
         .apply()
+
+    // ---- 免认证网络名单 ----
+    // 这些网络连上就能上网、不需要 portal 认证。存的是网络指纹（见 WifiNet.networkKey）。
+    fun getOpenNetworks(): Set<String> =
+        prefs.getStringSet(Const.KEY_OPEN_NETWORKS, emptySet()) ?: emptySet()
+
+    fun isOpenNetwork(key: String?): Boolean = key != null && getOpenNetworks().contains(key)
+
+    /** 记住一个免认证网络：下次连上直接判定，跳过探针。 */
+    fun addOpenNetwork(key: String) {
+        if (key.isBlank()) return
+        prefs.edit().putStringSet(Const.KEY_OPEN_NETWORKS, getOpenNetworks() + key).apply()
+    }
+
+    /**
+     * 从免认证名单里移除。
+     *
+     * 登录成功时必须调用：既然在这个网络里能登录成功，就说明它是**需要认证**的，
+     * 不能再留在免认证名单里，否则下次连上会被直接判成"已连接"而不再登录。
+     * 这样就实现了双向修正：判错了一次，登录成功立刻纠正回来。
+     */
+    fun removeOpenNetwork(key: String) {
+        if (key.isBlank()) return
+        prefs.edit().putStringSet(Const.KEY_OPEN_NETWORKS, getOpenNetworks() - key).apply()
+    }
 }

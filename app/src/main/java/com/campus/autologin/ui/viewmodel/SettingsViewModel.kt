@@ -7,6 +7,8 @@ import com.campus.autologin.CampusApp
 import com.campus.autologin.data.model.LoginConfig
 import com.campus.autologin.data.model.LoginResult
 import com.campus.autologin.service.AutoLoginService
+import com.campus.autologin.util.ErrorText
+import com.campus.autologin.service.KeepAlive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,13 +41,8 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun save() {
         repo.saveConfig(_config.value, _password.value)
-        // 保存后按最新开关状态同步后台服务与通知样式
-        val cfg = _config.value
-        if (cfg.autoLogin || cfg.alwaysRunInBackground) {
-            AutoLoginService.start(getApplication())
-        } else {
-            AutoLoginService.stop(getApplication())
-        }
+        // 保存后按最新开关状态同步：前台服务 + WorkManager 兜底任务
+        KeepAlive.sync(getApplication())
         AutoLoginService.refreshNotification(getApplication())
     }
 
@@ -54,7 +51,7 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             _testing.value = true
             try {
                 _testResult.value = runCatching { repo.login() }
-                    .getOrElse { LoginResult.Error("测试失败：${it.message}", it) }
+                    .getOrElse { LoginResult.Error("测试失败：${ErrorText.of(it)}", it) }
             } finally {
                 _testing.value = false
             }

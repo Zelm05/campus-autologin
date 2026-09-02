@@ -33,19 +33,27 @@ object NetworkProbe {
 
     private data class Probe(val url: String, val expect204: Boolean)
 
+    /**
+     * 探针顺序很讲究：
+     *  · **域名探针放前面**：未认证的校园网关几乎必然劫持域名（baidu/qq/各家系统探测
+     *    站点），一劫持就能立刻定位门户地址 → CAPTIVE，判定最准。
+     *  · **IP 字面量放后面**：部分网关只劫持域名、放行 IP 直连，如果让 223.5.5.5 这类
+     *    IP 先跑，会直接 204 被当成"已在线"，还没轮到域名探针就误判 ONLINE——
+     *    这就是"已下线/未认证却显示已连接"的根因之一。
+     *    它们现在只作为"前面都没被劫持"时的兜底在线信号。
+     */
     private val PROBES = listOf(
-        // —— IP 字面量：不依赖 DNS，未认证时必被网关劫持 ——
-        Probe("http://223.5.5.5/generate_204", true),
-        Probe("http://119.29.29.29/", false),
-        Probe("http://114.114.114.114/", false),
-        // —— 各家系统探针 ——
+        // —— 域名探针：必被网关劫持，优先 ——
+        Probe("http://www.baidu.com/", false),
+        Probe("http://www.qq.com/", false),
         Probe("http://connectivitycheck.gstatic.com/generate_204", true),
         Probe("http://connect.rom.miui.com/generate_204", true),
         Probe("http://connect.hicloud.com/generate_204", true),
         Probe("http://www.msftconnecttest.com/connecttest.txt", false),
-        // —— 国内站点：几乎一定被校园网关拦 ——
-        Probe("http://www.baidu.com/", false),
-        Probe("http://www.qq.com/", false)
+        // —— IP 字面量：不依赖 DNS，前面全被放行时才作为在线证据 ——
+        Probe("http://223.5.5.5/generate_204", true),
+        Probe("http://119.29.29.29/", false),
+        Probe("http://114.114.114.114/", false)
     )
 
     /** 响应体里的门户跳转：优先找 index.jsp?...，再找通用 location.href。 */
@@ -68,7 +76,10 @@ object NetworkProbe {
      * @param net 绑定用的 WiFi 网络；null 时走默认网络。
      */
     suspend fun detect(net: Network?): ProbeOutcome = withContext(Dispatchers.IO) {
-        val client = WifiNet.client(net, timeoutMs = 4_000L, followRedirects = false)
+        // fallbackDns=false：探测必须只用目标网络自己的 DNS。
+        // 开着移动数据时，若回退到系统 DNS（走 4G），baidu 等会解析出真实公网 IP，
+        // WiFi socket 直连成功后网关若只劫持域名就会误判"已在线"。
+        val client = WifiNet.client(net, timeoutMs = 4_000L, followRedirects = false, fallbackDns = false)
         val trace = StringBuilder()
         var sawOnline = false
         // 总时长上限：WiFi 完全不通时 9 个探针串行超时会让界面转圈太久

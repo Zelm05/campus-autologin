@@ -1,6 +1,7 @@
 package com.campus.autologin.ui.screen
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +36,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +45,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -52,7 +55,10 @@ import androidx.navigation.NavController
 import com.campus.autologin.BuildConfig
 import com.campus.autologin.data.model.LoginResult
 import com.campus.autologin.data.remote.CampusConfig
+import com.campus.autologin.service.AutoLoginService
 import com.campus.autologin.ui.viewmodel.SettingsViewModel
+import com.campus.autologin.util.BatteryOpt
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -152,14 +158,11 @@ fun SettingsScreen(nav: NavController, vm: SettingsViewModel = viewModel()) {
                         checked = cfg.showMonitorNotification,
                         onCheckedChange = { vm.update { copy(showMonitorNotification = it) } }
                     )
-                    Text(
-                        "关闭后前台服务仍会保留一条极简通知（仅图标），这是 Android 8+ 强制要求。完全关闭需关闭应用通知权限",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp)
-                    )
                 }
             }
+
+            SectionTitle("后台保活")
+            KeepAliveCard()
 
             SectionTitle("校园网配置")
             LockedConfigCard()
@@ -252,6 +255,102 @@ fun SettingsScreen(nav: NavController, vm: SettingsViewModel = viewModel()) {
                 Text("关于应用")
             }
         }
+    }
+}
+
+/**
+ * 后台保活状态卡。
+ *
+ * 这一页不是为了好看，是为了回答"我明明开了自启动，为什么还是掉后台"：
+ * 把三条真正决定生死的状态摆出来——前台服务在不在、电池优化有没有豁免、
+ * 厂商省电策略有没有放行，并给出直达系统的入口。
+ */
+@Composable
+private fun KeepAliveCard() {
+    val context = LocalContext.current
+    var serviceOn by remember { mutableStateOf(AutoLoginService.isRunning) }
+    var startError by remember { mutableStateOf(AutoLoginService.lastStartError) }
+    var ignoring by remember { mutableStateOf(BatteryOpt.isIgnoring(context)) }
+
+    // 设置页停留期间每 2 秒刷一次，从系统设置返回时能立刻看到变化
+    LaunchedEffect(Unit) {
+        while (true) {
+            serviceOn = AutoLoginService.isRunning
+            startError = AutoLoginService.lastStartError
+            ignoring = BatteryOpt.isIgnoring(context)
+            delay(2000)
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column {
+            KeepAliveRow(
+                label = "后台监控",
+                value = if (serviceOn) "运行中" else "未运行",
+                valueColor = if (serviceOn) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.error
+            )
+            if (!serviceOn) {
+                Text(
+                    startError?.let { "上次拉起失败：$it" }
+                        ?: "打开 App 后会自动恢复；若反复停止，请完成下面两项设置。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp)
+                )
+            }
+            KeepAliveRow(
+                label = "电池优化",
+                value = if (ignoring) "已豁免" else "未豁免，点此设置",
+                valueColor = if (ignoring) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.error,
+                onClick = { if (!ignoring) BatteryOpt.requestIgnore(context) }
+            )
+            KeepAliveRow(
+                label = "自启动与省电策略",
+                value = "去系统设置",
+                valueColor = MaterialTheme.colorScheme.primary,
+                onClick = { BatteryOpt.openAppDetails(context) }
+            )
+            Text(
+                "国内 ROM（MIUI / 鸿蒙 / ColorOS / OriginOS 等）还有各自的后台冻结策略，" +
+                    "需要在上面的系统设置里把本应用加入「自启动」和「后台运行」白名单，" +
+                    "否则熄屏一段时间后系统仍会回收监控。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 14.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun KeepAliveRow(
+    label: String,
+    value: String,
+    valueColor: androidx.compose.ui.graphics.Color,
+    onClick: (() -> Unit)? = null
+) {
+    val modifier = onClick?.let { cb ->
+        Modifier
+            .fillMaxWidth()
+            .clickable { cb() }
+            .padding(horizontal = 16.dp, vertical = 14.dp)
+    } ?: Modifier
+        .fillMaxWidth()
+        .padding(horizontal = 16.dp, vertical = 14.dp)
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = valueColor,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
+        )
     }
 }
 

@@ -23,4 +23,7 @@ object Const {
     const val KEY_USER_INFO_SERVICE = "user_info_service"
     const val KEY_USER_INFO_WLAN_HEX = "user_info_wlan_hex"
     const val KEY_MANUAL_LOGOUT_AT = "manual_logout_at"
+    // 免认证网络名单：这些网络连上就能上网，不需要 portal 认证。
+    // 值为网络指纹集合（优先 WiFi 名称，取不到时退回网关 IP，见 WifiNet.networkKey）。
+    const val KEY_OPEN_NETWORKS = "open_networks"
 }

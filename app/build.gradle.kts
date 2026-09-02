@@ -13,8 +13,8 @@ android {
         applicationId = "com.campus.autologin"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.0.3"
     }
 
     // 从项目根目录 keystore.properties 读取发布签名（本地 / CI 通用）。

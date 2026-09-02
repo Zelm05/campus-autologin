@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 允许申请加入电池优化白名单：不做这一步，熄屏后进程会被冻结，
+         网络回调和兜底任务都会失效，表现就是"自启动开了却掉后台" -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:name=".CampusApp"
@@ -31,9 +35,11 @@
             </intent-filter>
         </activity>
 
+        <!-- stopWithTask=false：从最近任务划掉时不要连服务一起停掉 -->
         <service
             android:name=".service.AutoLoginService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />
 
         <receiver
@@ -43,6 +49,8 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <!-- 部分 MTK / 旧 HTC 设备开机只发这个非标准广播 -->
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>
         </receiver>
 

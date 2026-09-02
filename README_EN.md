@@ -13,7 +13,7 @@ Installers are in [`release/`](release/):
 
 | Platform | File | Notes |
 | --- | --- | --- |
-| Android | `release/Autologin-v1.0.1_release.apk` | Install directly; overwrite keeps your credentials |
+| Android | `release/Autologin-v1.0.3_release.apk` | Install directly; overwrite keeps your credentials. Older v1.0.1 is kept in this folder |
 | Windows | `release/Autologin_v1.1.0_x64_setup.exe` | No admin required; in-place upgrade supported |
 
 > New Android APKs are also built automatically via GitHub Actions: push a `v*` tag to get a signed APK from the Release page.
