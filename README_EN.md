@@ -14,9 +14,22 @@ Installers are in [`release/`](release/):
 | Platform | File | Notes |
 | --- | --- | --- |
 | Android | `release/Autologin-v1.0.3_release.apk` | Install directly; overwrite keeps your credentials. Older v1.0.1 is kept in this folder |
-| Windows | `release/Autologin_v1.2.0_x64_setup.exe` | No admin required; in-place upgrade supported. v1.2.0 adds "Turbo Start": runs at boot, even on the lock screen |
+| Windows | `release/Autologin_v1.2.0_x64_setup.exe` | No admin required; in-place upgrade supported. Starting the background service also enables auto-run after login; optional "Turbo Start" runs at boot, even on the lock screen |
 
 > New Android APKs are also built automatically via GitHub Actions: push a `v*` tag to get a signed APK from the Release page.
+
+## ⚠️ Important — enable auto-start
+
+**The app relies on running in the background; without auto-start it will NOT relogin after a drop:**
+
+- **Windows**: open the app → fill in credentials → Save → press "**▶ Start background service**"
+  (also enables auto-run after login, no admin needed). To also run before login / on the lock
+  screen, tick "**Turbo Start**".
+- **Android**: you must **manually enable "Auto-start / Run in background" for the app in
+  System Settings** for it to take effect (paths differ by vendor — usually
+  Settings → Apps → this app → Auto-start / Battery management; Xiaomi / Huawei / OPPO /
+  vivo restrict background apps by default). Keep it resident — if the system kills it,
+  it cannot auto-relogin. You may disable the "Monitoring" notification if you don't want it.
 
 ## Project layout
 
@@ -27,9 +40,9 @@ campus-autologin/
 ├── app/                    # Android app (Kotlin + Jetpack Compose)
 ├── windows/
 │   └── source/             # Windows desktop app (Python + pywebview)
-│       ├── app.py · campus_core.py · daemon.py · gui.py · config.json
+│       ├── app.py · campus_core.py · daemon.py · gui.py   # runtime files (config.json etc.) are not committed
 │       ├── requirements.txt · README.md · 使用说明.txt · 启动设置.bat
-│       └── build/          # packaging: CampusLogin.spec · icon.ico · setup.iss · version_info.txt
+│       └── build/          # packaging: CampusLogin.spec · icon.ico · setup.iss · build.bat · version_info.txt
 ├── release/                # downloadable installers (APK / EXE)
 ├── screenshots/            # UI screenshots for the README
 ├── build.gradle.kts        # root build script
@@ -52,7 +65,6 @@ campus-autologin/
 - Android: credentials stay on-device (Android Keystore encryption); the only network target is the campus gateway
 - Windows: credentials stay in the local `config.json` , never uploaded
 - This repository contains no personal data and no signing private key
-- Note: All of them require auto-start to be enabled, otherwise they won't take effect. On Android, if you don't want the "Monitoring" notification to show, you can disable the notification permission
 
 ## Disclaimer
 

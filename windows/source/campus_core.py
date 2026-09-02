@@ -16,13 +16,15 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime
 
-APP_VERSION = "1.2.0"   # 应用版本号（显示在设置页脚与 exe 文件属性里）
+APP_VERSION = "1.2.0"   # 正式版号（内部迭代 v1.2.1~v1.2.13 的修复已全部并入本版）
 APP_NAME = "校园网自动登录"
 
 # 数据目录：源码运行时 = 本文件所在目录；
@@ -526,21 +528,67 @@ def daemon_pid():
 #   开机级 BOOT_TASK     （/sc ONSTART）—— 需管理员一次性授权，开机即启动，
 #                                          锁屏状态下就已经在后台运行。
 # ----------------------------------------------------------------------
-AUTOSTART_TASK = "CampusAutoLogin"       # 登录级任务名
+AUTOSTART_TASK = "CampusAutoLogin"       # 登录级计划任务名（v1.2.12 起改用 Startup 文件夹方案，此名仅作历史兼容保留）
 BOOT_TASK = "CampusAutoLoginBoot"        # 开机级任务名
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _RUN_NAME = "CampusAutoLogin"            # 旧版（<= v1.1.0）遗留的注册表项名
+
+# 「登录后自动运行后台服务」的启动器：放在用户级 Startup 文件夹，
+# 登录 Windows 后由 Windows 自动执行。比注册表 Run 早（不经过 Windows 启动项延迟），
+# 比 schtasks ONLOGON 可靠（无需 UAC/无需 schtasks，普通用户权限即可读写）。
+_STARTUP_DIR = os.path.join(os.environ.get("APPDATA", ""),
+                            r"Microsoft\Windows\Start Menu\Programs\Startup")
+_STARTUP_AUTOSTART_CMD = os.path.join(_STARTUP_DIR, "校园网自动登录.cmd")
+
+# 极速启动（开机级）的开关状态文件：由创建/删除成功的提权子进程（管理员）写入。
+# 为什么不用 schtasks /query 作主判据？——Windows Task Scheduler 服务在不同完整性级别间
+# 存在同步/可见性差异，非管理员父进程的 `schtasks /query` 往往查不到刚由管理员创建的
+# SYSTEM 任务，导致指示灯/勾选框被反复刷回"未开启"（v1.2.9 之前的表象）。本程序是任务的
+# 唯一管理方，因此以"自己写入的开关状态"为权威来源，schtasks 仅在状态文件缺失时回退查询。
+BOOT_TASK_STATE = os.path.join(APP_DIR, "boot_task.json")
+
+
+def _save_boot_state(enable):
+    """把极速启动开关状态写入状态文件（供父进程 UI 查询）。失败静默忽略。"""
+    try:
+        with open(BOOT_TASK_STATE, "w", encoding="utf-8") as f:
+            json.dump({"enabled": bool(enable),
+                       "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")}, f,
+                      ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _short_path(path):
+    """把长路径转成 Windows 8.3 短路径名，避免中文/空格在计划任务 SYSTEM 权限下解析异常。
+    取不到短路径时原样回退。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+        if not path:
+            return path
+        if not os.path.exists(path):
+            return path
+        # GetShortPathNameW(h_lpszLongPath, lpszShortPath, cchBuffer)
+        sz = ctypes.windll.kernel32.GetShortPathNameW(path, buf, wintypes.MAX_PATH)
+        if sz and sz <= wintypes.MAX_PATH:
+            return buf.value
+    except Exception:
+        pass
+    return path
 
 
 def daemon_command():
     """后台守护启动命令（计划任务与旧注册表项共用）"""
     if getattr(sys, "frozen", False):
-        return '"%s" --daemon' % sys.executable
+        exe = _short_path(sys.executable)
+        return '"%s" --daemon' % exe
     exe = sys.executable
     pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
     if os.path.exists(pythonw):
         exe = pythonw
-    return '"%s" "%s"' % (exe, os.path.join(APP_DIR, "daemon.py"))
+    return '"%s" "%s"' % (_short_path(exe), _short_path(os.path.join(APP_DIR, "daemon.py")))
 
 
 def _run_cmd(cmd, timeout=25):
@@ -593,33 +641,61 @@ def _cleanup_legacy_run_key():
 
 
 def autostart_enabled():
-    """登录级自启（免管理员）是否已开启"""
-    return _task_exists(AUTOSTART_TASK)
+    """登录级自启（免管理员）是否已开启：通过启动文件夹里的启动器是否存在判定。
+
+    实现方式：把 `校园网自动登录.cmd` 放进用户的「启动」文件夹
+    （%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup），
+    登录后 Windows 会自动执行。这是用户级操作，无需 schtasks、不弹 UAC，
+    比注册表 Run 早（不经过 Windows 启动项延迟）。"""
+    return os.path.exists(_STARTUP_AUTOSTART_CMD)
 
 
 def set_autostart(enable):
-    """开启/关闭登录级自启。免管理员。返回 (ok, 说明)
+    """开启/关闭登录级自启（通过「启动」文件夹的 .cmd 启动器）。免管理员。返回 (ok, 说明)
 
-    说明：计划任务的 /tr 命令里若含空格，需用引号包住可执行文件路径，
-    daemon_command() 已处理。/delay 0000:00 显式取消 Windows 默认的启动延迟。
-    """
+    实现：写/删一份指向本程序 exe 的 .cmd 启动器到用户的 Startup 文件夹。
+    登录后由 Windows 自动执行，启动器调用 `CampusLogin.exe --daemon`，
+    daemon 单实例保护拦重复。"""
     if not enable:
-        _task_delete(AUTOSTART_TASK)
-        _cleanup_legacy_run_key()
-        return (not _task_exists(AUTOSTART_TASK)), "已关闭开机自启"
-    _cleanup_legacy_run_key()
-    cmd = ["schtasks", "/create", "/tn", AUTOSTART_TASK,
-           "/tr", daemon_command(), "/sc", "ONLOGON", "/delay", "0000:00", "/f"]
-    rc, out = _run_cmd(cmd)
-    if rc != 0:
-        # 少数系统/语言环境下 /delay 参数写法不被接受，退化重试（不带 /delay）
-        rc, out = _run_cmd(["schtasks", "/create", "/tn", AUTOSTART_TASK,
-                            "/tr", daemon_command(), "/sc", "ONLOGON", "/f"])
-    return rc == 0, out
+        try:
+            os.remove(_STARTUP_AUTOSTART_CMD)
+        except OSError:
+            pass
+        return (not autostart_enabled()), "已关闭开机自启"
+    try:
+        os.makedirs(os.path.dirname(_STARTUP_AUTOSTART_CMD), exist_ok=True)
+    except OSError as e:
+        return False, "创建启动目录失败：%s" % e
+    # 写 .cmd 启动器：用 8.3 短路径规避中文/空格在 cmd 解析异常
+    try:
+        if getattr(sys, "frozen", False):
+            exe = _short_path(sys.executable)
+        else:
+            exe = _short_path(sys.executable)
+        content = '@echo off\r\nstart "" "%s" --daemon\r\n' % exe
+        with open(_STARTUP_AUTOSTART_CMD, "w", encoding="gbk") as f:
+            f.write(content)
+    except OSError as e:
+        return False, "写入启动器失败：%s" % e
+    if not autostart_enabled():
+        return False, "启动器写入后仍不可见"
+    return True, "已开启开机自启（登录 Windows 后自动运行）"
 
 
 def boot_task_enabled():
-    """开机级自启（需管理员）是否已开启"""
+    """开机级自启（需管理员）是否已开启。
+
+    权威来源是本程序自维护的 boot_task.json 状态文件（创建/删除成功时由提权进程写入）。
+    为什么不用 schtasks /query 作主判据：Windows Task Scheduler 服务在不同完整性级别间存在
+    可见性差异，非管理员父进程的 /query 往往查不到刚由管理员创建的 SYSTEM 任务——若以它
+    为准，指示灯/勾选框会被反复刷回"未开启"（v1.2.9/1.2.10 持续出现的表象）。
+    状态文件缺失（首次使用 / 旧版升级尚未写入）时才回退一次 schtasks 查询。
+    """
+    try:
+        with open(BOOT_TASK_STATE, "r", encoding="utf-8") as f:
+            return bool(json.load(f).get("enabled", False))
+    except Exception:
+        pass
     return _task_exists(BOOT_TASK)
 
 
@@ -628,11 +704,16 @@ def set_boot_task(enable):
 
     需要管理员权限；非管理员进程调用会返回失败，由调用方负责 runas 提权后重入。
     用 /ru SYSTEM 而非存储用户密码：密码变更不会导致任务失效，也不用存明文口令。
+    任务创建/删除成功（schtasks 双重验证通过）后，把开关状态写入 boot_task.json，
+    供父进程（非管理员）的 UI 查询——避免 schtasks 跨完整性级别查询不可靠导致状态闪烁。
     返回 (ok, 说明)
     """
     if not enable:
         _task_delete(BOOT_TASK)
-        return (not _task_exists(BOOT_TASK)), "已关闭极速启动"
+        ok = not _task_exists(BOOT_TASK)
+        if ok:
+            _save_boot_state(False)
+        return ok, "已关闭极速启动"
     if not is_admin():
         return False, "需要管理员权限"
     cmd = ["schtasks", "/create", "/tn", BOOT_TASK, "/tr", daemon_command(),
@@ -640,7 +721,37 @@ def set_boot_task(enable):
     rc, out = _run_cmd(cmd)
     if rc != 0:
         return False, out
-    return True, "已开启极速启动（开机即运行，锁屏时也在后台）"
+    # 二次验证：schtasks /create 可能返回 0 但任务实际未生效（受限环境/策略拒绝）
+    # 只有真正查询到任务存在，才避免“提示已开启但勾选消失/图标不亮”的误报。
+    if _task_exists(BOOT_TASK):
+        _save_boot_state(True)
+        return True, "已开启极速启动（开机即运行，锁屏时也在后台）"
+    # 把 schtasks 的真实输出一并带出，便于定位（路径/权限/策略/安全软件拦截等均会体现在 out 里）
+    detail = ("；schtasks 原始输出：%s" % out) if out else ""
+    return False, "计划任务创建失败：schtasks 返回成功但任务不存在；%s" % detail
+
+
+# 提权子进程把「极速启动」创建/删除结果写到这里，供非管理员父进程读取。
+# 用用户级临时目录（父子进程同为当前用户，均可读写），避免安装到
+# Program Files 时父进程（非管理员）无写权限的问题。
+_ELEVATED_RESULT_FILE = os.path.join(tempfile.gettempdir(), "campus_autologin_boot_result.json")
+
+
+def _elevated_target(arg):
+    """返回 (exe, params)：以管理员身份重启动本程序并带上 arg（供 UAC 提权）。
+
+    结果文件路径由固定的 _ELEVATED_RESULT_FILE 约定，父子进程都读写同一个文件，
+    不再通过环境变量或命令行参数传递——因为 runas 提权后的子进程不会继承父进程
+    在运行时设置的环境变量，命令行传含中文/空格的路径又容易解析出错。"""
+    if getattr(sys, "frozen", False):
+        # 打包成 exe：直接以自身 + 参数提权
+        return sys.executable, arg
+    # 源码模式：优先用 python.exe（pythonw 无控制台，UAC 提权后看不到回显）
+    exe = sys.executable
+    py = os.path.join(os.path.dirname(exe), "python.exe")
+    if os.path.exists(py):
+        exe = py
+    return exe, '"%s" %s' % (os.path.join(APP_DIR, "gui.py"), arg)
 
 
 def elevate_self(arg):
@@ -648,16 +759,120 @@ def elevate_self(arg):
     返回 True 表示已成功发起提权请求（调用方随后应自行退出）。"""
     try:
         import ctypes
-        if getattr(sys, "frozen", False):
-            exe, params = sys.executable, arg
-        else:
-            exe = sys.executable
-            # 源码模式：优先用 python.exe（pythonw 无控制台，UAC 提权后看不到回显）
-            py = os.path.join(os.path.dirname(exe), "python.exe")
-            if os.path.exists(py):
-                exe = py
-            params = '"%s" %s' % (os.path.join(APP_DIR, "gui.py"), arg)
+        exe, params = _elevated_target(arg)
         rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, APP_DIR, 1)
         return rc > 32   # ShellExecute 返回值 >32 表示成功
     except Exception:
         return False
+
+
+def run_elevated_and_wait(arg, timeout_ms=90000):
+    """以管理员身份运行本程序并带上 arg，阻塞等待其结束，并读取结果文件。
+
+    专用于「极速启动」这类：需要管理员权限、且必须拿回真实执行结果（成功 /
+    schtasks 报错 / 用户取消 UAC）的场景。与 fire-and-forget 的 elevate_self
+    不同，这里用 ShellExecuteEx + WaitForSingleObject 真正等到子进程退出。
+
+    结果通过【固定文件】_ELEVATED_RESULT_FILE 在父子进程间传递：不再用环境变量
+    （runas 提权后的子进程不继承父进程运行时设置的环境变量，会导致读不回结果）、
+    也不再每次用随机文件名（容易与子进程写回的路径对不上）。
+
+    返回 (launched, exit_code, result)：
+      - launched=False  → 用户拒绝 UAC 或提权失败（子进程根本没启动）
+      - launched=True   → 子进程已退出，exit_code 为其退出码（0=成功）
+      - result          → 子进程写回的结果字典（读不到则为 None）
+    """
+    # 先清掉上次可能残留的结果文件，避免读到陈旧结果
+    try:
+        os.remove(_ELEVATED_RESULT_FILE)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        from ctypes import wintypes
+        exe, params = _elevated_target(arg)
+
+        class SHELLEXECUTEINFOW(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("fMask", wintypes.ULONG),
+                ("hwnd", wintypes.HWND),
+                ("lpVerb", wintypes.LPCWSTR),
+                ("lpFile", wintypes.LPCWSTR),
+                ("lpParameters", wintypes.LPCWSTR),
+                ("lpDirectory", wintypes.LPCWSTR),
+                ("nShow", ctypes.c_int),
+                ("hInstApp", wintypes.HANDLE),
+                ("lpIDList", ctypes.c_void_p),
+                ("lpClass", wintypes.LPCWSTR),
+                ("hKeyClass", wintypes.HKEY),
+                ("dwHotKey", wintypes.DWORD),
+                ("hIconOrMonitor", wintypes.HANDLE),
+                ("hProcess", wintypes.HANDLE),
+            ]
+
+        SEE_MASK_NOCLOSEPROCESS = 0x00000040
+        sei = SHELLEXECUTEINFOW()
+        sei.cbSize = ctypes.sizeof(sei)
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS
+        sei.hwnd = None
+        sei.lpVerb = "runas"
+        sei.lpFile = exe
+        sei.lpParameters = params
+        sei.lpDirectory = APP_DIR
+        sei.nShow = 1
+        if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei)):
+            # 返回 0 = 用户取消 UAC 或提权失败
+            return False, None, None
+        h_proc = sei.hProcess
+        ctypes.windll.kernel32.WaitForSingleObject(h_proc, timeout_ms)
+        code = wintypes.DWORD()
+        ctypes.windll.kernel32.GetExitCodeProcess(h_proc, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(h_proc)
+        # 读固定结果文件（父子进程共用同一路径 _ELEVATED_RESULT_FILE）
+        res = read_elevated_result()
+        return True, code.value, res
+    except Exception:
+        return False, None, None
+
+
+def _result_file(path=None):
+    """结果文件路径：显式 path 优先；否则用固定文件 _ELEVATED_RESULT_FILE。
+
+    早期版本用过环境变量 CAL_RESULT_FILE / 随机文件名在父子进程间传结果，但
+    runas 提权后的子进程不继承父进程运行时设置的环境变量，导致父进程读不回结果、
+    前端永远落到“真实状态验证不符”的兜底提示。现统一用固定文件，父子都读写同一路径。"""
+    if path:
+        return path
+    return _ELEVATED_RESULT_FILE
+
+
+def write_elevated_result(ok, msg, path=None):
+    """提权子进程把执行结果写到固定文件，供父进程（非管理员）读取。
+
+    path 为 None 时写到固定的 _ELEVATED_RESULT_FILE（父子进程共用同一路径）。"""
+    path = _result_file(path)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"ok": bool(ok), "msg": msg}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def read_elevated_result(path=None):
+    """读取提权子进程写入的结果（读后删除）。读不到返回 None。
+
+    path 为 None 时读取固定的 _ELEVATED_RESULT_FILE。"""
+    path = _result_file(path)
+    try:
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return data
+    except Exception:
+        return None

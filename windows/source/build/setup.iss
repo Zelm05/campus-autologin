@@ -1,5 +1,5 @@
 ; ============================================================
-; 校园网自动登录 v1.2.0 安装脚本
+; 校园网自动登录 v1.2.1 安装脚本
 ; 默认安装到 D:\校园网自动登录，用户可在安装向导自由更改
 ; 编译：D:\inno\ISCC.exe build\setup.iss
 ;
@@ -120,19 +120,24 @@ end;
 // 卸载时一并清理开机自启项（指向已删除的 exe 会造成开机报错）
 // v1.2：自启方式已从「注册表 Run 键」改为「计划任务」双轨制，
 //       登录级(CampusAutoLogin) 与 开机级(CampusAutoLoginBoot) 都要清理。
+// v1.2.13：「登录后自启」改用「启动文件夹」的 .cmd 启动器，卸载时一并删除。
 procedure RemoveAutostart();
 var
   RC: Integer;
+  StartupCmd: string;
 begin
   // 旧版（<= v1.1.0）遗留的注册表项，兼容清理
   RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'CampusAutoLogin');
-  // 登录级任务：用户权限即可删除
+  // v1.2.13 之前的登录级计划任务（v1.2.12 短暂使用过，v1.2.13 已不再创建）—— 兼容清理
   Exec(ExpandConstant('{sys}\schtasks.exe'), '/delete /tn "CampusAutoLogin" /f', '',
        SW_HIDE, ewWaitUntilTerminated, RC);
   // 开机级任务：以 SYSTEM 身份创建，删除需要管理员。
   // 卸载本身不要求管理员（PrivilegesRequired=lowest），此处仅尽力而为，失败不阻塞卸载。
   Exec(ExpandConstant('{sys}\schtasks.exe'), '/delete /tn "CampusAutoLoginBoot" /f', '',
        SW_HIDE, ewWaitUntilTerminated, RC);
+  // v1.2.13 起：登录后自启的 .cmd 启动器（位于用户 Startup 文件夹）
+  StartupCmd := ExpandConstant('{userappdata}\Microsoft\Windows\Start Menu\Programs\Startup\校园网自动登录.cmd');
+  DeleteFile(StartupCmd);
 end;
 
 // 卸载时清理程序运行时生成的文件与日志。
@@ -159,6 +164,7 @@ begin
   if not Silent then
   begin
     DeleteFile(AppDir + '\config.json');
+    DeleteFile(AppDir + '\boot_task.json');  // 极速启动开关状态（卸载时任务也会被一并尝试删除）
     if DirExists(AppDir + '\logs') then
       DelTree(AppDir + '\logs', True, True, True);
   end;

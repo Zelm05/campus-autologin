@@ -27,15 +27,26 @@ def _report(ok, msg):
 
 def main():
     # 以下两个分支由 UAC 提权后的子进程执行（创建/删除开机级计划任务需要管理员）
+    # 结果写入固定文件（_ELEVATED_RESULT_FILE），供非管理员父进程同步读取。
+    # 注意：runas 提权后的子进程不继承父进程运行时设置的环境变量，因此不能用
+    # 环境变量/命令行参数传结果文件路径，父子进程统一读写同一个固定文件。
     if "--enable-boot-task" in sys.argv:
         import campus_core as core
-        ok, msg = core.set_boot_task(True)
-        _report(ok, msg)
+        try:
+            ok, msg = core.set_boot_task(True)
+        except Exception as e:
+            ok, msg = False, "极速启动开启异常：%s" % e
+        print(msg)
+        core.write_elevated_result(ok, msg)
         sys.exit(0 if ok else 1)
     elif "--disable-boot-task" in sys.argv:
         import campus_core as core
-        ok, msg = core.set_boot_task(False)
-        _report(ok, msg)
+        try:
+            ok, msg = core.set_boot_task(False)
+        except Exception as e:
+            ok, msg = False, "极速启动关闭异常：%s" % e
+        print(msg)
+        core.write_elevated_result(ok, msg)
         sys.exit(0 if ok else 1)
     elif "--daemon" in sys.argv:
         # 后台守护：绝不弹窗

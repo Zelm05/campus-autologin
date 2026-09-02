@@ -24,6 +24,13 @@ __pycache__/
 windows/source/build/stage/
 
 
+# Windows 运行期生成文件（本地账号/日志/状态，禁止提交）
+windows/source/config.json
+windows/source/boot_task.json
+windows/source/daemon.pid
+windows/source/status.json
+windows/source/logs/
+
 # Windows 发布物（走 GitHub Releases，不进仓库）
 windows/*.exe
 windows/*.zip

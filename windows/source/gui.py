@@ -156,18 +156,37 @@ def set_boot_task(enable):
     """开启/关闭开机级自启。返回 (ok, 说明)
 
     开机级任务以 SYSTEM 身份运行，创建/删除都需要管理员权限。
-    当前进程不是管理员时，弹 UAC 提权重启自身处理，界面只需提示用户确认。
+    当前进程不是管理员时，弹 UAC 提权重启自身处理；这里会同步等待提权子进程
+    结束并读回真实结果（成功 / schtasks 报错 / 用户取消 UAC），直接返回给前端，
+    不再用“轮询 30 秒超时”的方式猜测，避免“UAC 已点却仍显示超时”的误判。
     """
     ok, msg = core.set_boot_task(enable)
     if ok:
         log.info("[自启] 开机级（开机即启动、锁屏也运行）-> %s", "开启" if enable else "关闭")
         return True, msg
+    res = None
     if not core.is_admin():
         arg = "--enable-boot-task" if enable else "--disable-boot-task"
-        if core.elevate_self(arg):
-            return True, "已请求管理员授权，请在弹出的 UAC 窗口中确认"
-        return False, "无法获取管理员授权"
-    return False, msg
+        launched, code, res = core.run_elevated_and_wait(arg)
+        if not launched:
+            # 用户取消了 UAC，或提权失败 —— 明确告知，而不是“超时”
+            return False, "已取消管理员授权（UAC 被拒绝或未弹出）"
+    # 以提权子进程的“真实执行结果”为准：它是真正调用 schtasks 的一方，
+    # 其返回里带着 schtasks 的原始报错（权限/路径/策略/安全软件拦截等）。
+    # 用固定结果文件传递，不受 runas 不继承环境变量的影响，能可靠读回。
+    if res is not None:
+        if res.get("ok"):
+            return True, res.get("msg") or ("极速启动已%s" % ("开启" if enable else "关闭"))
+        child_msg = res.get("msg") or ""
+        if child_msg:
+            return False, "极速启动未%s：%s" % ("开启" if enable else "关闭", child_msg)
+    # 兜底：用真实任务状态二次确认（极少数情况子进程没写回结果文件时）
+    real_state = core.boot_task_enabled()
+    if real_state == enable:
+        return True, "极速启动已%s" % ("开启" if enable else "关闭")
+    base = msg if (msg and msg != "需要管理员权限") else ""
+    extra = ("：" + base) if base else "，且提权子进程未返回可用结果"
+    return False, "极速启动未%s（真实任务状态验证不符%s）" % ("开启" if enable else "关闭", extra)
 
 
 # ----------------------------------------------------------------------
@@ -382,14 +401,38 @@ class Handler(BaseHTTPRequestHandler):
             self._json(api_test())
         elif path == "/api/daemon/start":
             ok, msg = core.start_daemon()
+            # 让后台服务在重启/注销后依然自动运行：启动成功的同时创建「登录级自启任务」
+            # （ONLOGON / 当前用户身份，免管理员）。SYSTEM 开机任务（极速启动）在部分
+            # 环境不可靠（非管理员查不到、可能拉不起 daemon），登录级自启是"重启后仍
+            # 自动运行"的可靠兜底——用户身份写自己的安装目录没有任何权限障碍。
+            if ok:
+                a_ok, a_msg = core.set_autostart(True)
+                if a_ok:
+                    msg += "（已开启：登录 Windows 后自动运行）"
+                else:
+                    log.warning("[后台服务] 创建登录级自启任务失败：%s", a_msg)
+                    msg += "（已启动，但设置登录自启失败，详见日志）"
             self._json({"ok": ok, "message": msg})
         elif path == "/api/daemon/stop":
             ok, msg = core.stop_daemon()
-            self._json({"ok": ok, "message": msg})
+            # 停止后台服务的同时，关闭"登录后自动运行"（删除登录级自启任务）
+            a_ok, a_msg = core.set_autostart(False)
+            tip = "，已关闭登录后自动运行" if a_ok else ("，关闭登录自启失败：%s" % (a_msg or "未知"))
+            self._json({"ok": ok, "message": msg + tip})
         elif path == "/api/boottask":
             # 开机级自启：开机即启动、锁屏状态下也在后台运行（需管理员授权）
-            ok, msg = set_boot_task(bool(data.get("enable", False)))
-            self._json({"ok": ok, "message": msg})
+            enable = bool(data.get("enable", False))
+            ok, msg = set_boot_task(enable)
+            # 如果操作成功，提权子进程已经用 _task_exists 双重验证过任务确实存在/不存在，
+            # 以用户意图为准返回 boot_task——不再用 boot_task_enabled() 二次查询。
+            # 因为 Windows Task Scheduler 服务在不同完整性级别间的同步有短暂延迟，
+            # 父进程（非管理员）刚操作完立即查询可能会暂时看到"未开启"，但任务其实已建好。
+            # 操作失败时才查真实状态，让用户看到当前到底是什么状态。
+            if ok:
+                boot_task = enable
+            else:
+                boot_task = boot_task_enabled()
+            self._json({"ok": ok, "message": msg, "boot_task": boot_task})
         elif path == "/api/openlog":
             try:
                 os.makedirs(core.LOG_DIR, exist_ok=True)
@@ -571,6 +614,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .ico.auto { background: var(--pink-soft); color: var(--pink); }
   .ico.count { background: var(--warn-soft); color: var(--warn); }
   .lastinfo { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  /* 保存/极速启动/后台服务的成功·失败提示：ok 绿、err 红（之前缺这条，报错一直是默认灰字） */
+  .msg { font-size: 12.5px; min-height: 16px; margin-top: 8px; line-height: 1.5; white-space: pre-wrap; }
+  .msg.ok { color: var(--ok); }
+  .msg.err { color: var(--err); font-weight: 600; }
   /* 自定义退出模态框（替代丑的浏览器 confirm） */
   .modal { position: fixed; inset: 0; z-index: 1000;
            display: none; align-items: center; justify-content: center; }
@@ -695,7 +742,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
 
       <div class="card daemon">
         <h2>后台服务</h2>
-        <div class="hint">常驻后台，掉线自动重连；退出设置界面后继续运行</div>
+        <div class="hint">常驻后台自动重连，退出设置界面后继续运行。点「启动」会同时设为<b>登录 Windows 后自动运行</b>（免管理员）；如需开机未登录/锁屏时也运行，请再勾选「极速启动」</div>
         <div class="actions">
           <button class="btn amber" onclick="daemonCtl('start')">▶ 启动</button>
           <button class="btn warm" onclick="daemonCtl('stop')">■ 停止</button>
@@ -819,39 +866,33 @@ function save() {
   });
 }
 
-// 极速启动：走独立接口。勾选后会弹 UAC，真正的任务创建/删除由提权子进程
-// 异步完成，所以这里轮询真实状态（最多 30 秒）、以任务是否实际存在为准
-// 更新「运行情况」卡片，避免"勾了但卡片一直显示未开启"的不同步。
+// 极速启动：走独立接口。勾选后服务端会弹 UAC 并同步等待提权子进程结束。
+// 子进程已用 schtasks /query 双重验证任务存在性；前端以响应里的 boot_task 为准刷新，
+// 轮询仅用来同步"运行情况"指示灯与文字，不再无条件覆盖勾选框（避免 Task Scheduler
+// 同步延迟导致的"勾选后自己取消"）。
 async function onBootTaskChange() {
   const want = $('boot_task').checked;
   const m = $('save_msg');
-  const r = await api('/api/boottask', {enable: want});
-  if (!r.ok) {                            // 直接失败（如 UAC 被取消）
-    m.className = 'msg err';
-    m.textContent = '设置失败：' + (r.message || '未知错误');
-    $('boot_task').checked = !want;       // 回滚勾选
-    refreshStatus();
-    return;
-  }
   m.className = 'msg ok';
-  m.textContent = want ? '正在等待管理员授权…（请在 UAC 窗口点「是」）' : '正在关闭…';
-  let last = null;
-  for (let i = 0; i < 30; i++) {          // 每秒查一次真实任务状态
-    await new Promise(res => setTimeout(res, 1000));
-    last = await api('/api/status');
-    setChip($('d_boot'), last.boot_task);
-    $('boot_task_state').textContent = last.boot_task ? '已开启' : '未开启';
-    if (last.boot_task === want) {
-      m.className = 'msg ok';
-      m.textContent = want ? '极速启动已开启 ✓（重启电脑后生效）' : '极速启动已关闭';
-      refreshStatus();
-      return;
-    }
+  m.textContent = want ? '正在请求管理员授权…（请在 UAC 窗口点「是」）' : '正在关闭…';
+  const r = await api('/api/boottask', {enable: want});
+  // 以服务端返回的状态为准（成功时即用户意图；失败时即当前真实状态）
+  const real = (r && typeof r.boot_task === 'boolean') ? r.boot_task : want;
+  $('boot_task').checked = real;
+  setChip($('d_boot'), real);
+  $('boot_task_state').textContent = real ? '已开启' : '未开启';
+  m.className = r.ok ? 'msg ok' : 'msg err';
+  m.textContent = r.message || (r.ok ? (real ? '极速启动已开启 ✓' : '极速启动已关闭') : '失败');
+  if (!r.ok) { refreshStatus(); return; }
+  // 兜底：轮询几秒让"运行情况"图标追上真实状态；只有当真实状态与用户意图一致时才
+  // 跳出循环——避免在 Task Scheduler 同步完成前错误地再次覆盖勾选框。
+  for (let i = 0; i < 8; i++) {
+    await new Promise(res => setTimeout(res, 700));
+    const s = await api('/api/status');
+    setChip($('d_boot'), s.boot_task);
+    $('boot_task_state').textContent = s.boot_task ? '已开启' : '未开启';
+    if (s.boot_task === want) break;
   }
-  // 超时：按真实状态回滚勾选，提示重试
-  m.className = 'msg err';
-  m.textContent = '等待授权超时，请重试（注意确认弹出的 UAC 窗口）';
-  $('boot_task').checked = last ? last.boot_task : !want;
   refreshStatus();
 }
 
@@ -1097,15 +1138,9 @@ def main():
     # 不会误开一个已经打不开的旧地址。
     _clear_port_file()
 
-    # 旧版迁移：早先版本提供「登录级自启」（登录后启动，免管理员），
-    # 现已统一为「极速启动」（开机即启动、锁屏也运行）。
-    # 检测到旧登录级任务时自动移除，避免两套自启并存导致重复启动守护。
-    if core.autostart_enabled():
-        try:
-            core.set_autostart(False)
-            log.info("[自启] 检测到旧版登录级自启任务，已自动移除（现统一使用极速启动）")
-        except OSError as e:
-            log.warning("[自启] 清理旧版登录级自启任务失败：%s", e)
+    # 注：v1.2.12 起不再自动删除「登录级自启任务 CampusAutoLogin」——它是后台服务
+    # 在重启/注销后自动运行的可靠通道（当前用户身份、免管理员）。SYSTEM 开机任务
+    # （极速启动）在部分环境不可靠，登录级自启与之并存时由 daemon 单实例保护拦重复。
 
     try:
         # 端口传 0：由系统分配一个空闲端口。
@@ -1191,12 +1226,22 @@ def main():
 
 if __name__ == "__main__":
     # 源码模式下由 UAC 提权后的子进程执行（创建/删除开机级计划任务需管理员）
+    # 结果写入固定文件（_ELEVATED_RESULT_FILE），供非管理员父进程同步读取。
+    # 注意：runas 提权后的子进程不继承父进程运行时设置的环境变量，因此统一用固定文件。
     if "--enable-boot-task" in sys.argv:
-        ok, msg = core.set_boot_task(True)
+        try:
+            ok, msg = core.set_boot_task(True)
+        except Exception as e:
+            ok, msg = False, "极速启动开启异常：%s" % e
         print(msg)
+        core.write_elevated_result(ok, msg)
         sys.exit(0 if ok else 1)
     if "--disable-boot-task" in sys.argv:
-        ok, msg = core.set_boot_task(False)
+        try:
+            ok, msg = core.set_boot_task(False)
+        except Exception as e:
+            ok, msg = False, "极速启动关闭异常：%s" % e
         print(msg)
+        core.write_elevated_result(ok, msg)
         sys.exit(0 if ok else 1)
     main()

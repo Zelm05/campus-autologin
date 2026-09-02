@@ -156,13 +156,46 @@ def attempt_login(cfg, qs, portal_base, reason="掉线"):
 # ----------------------------------------------------------------------
 # 主循环
 # ----------------------------------------------------------------------
+def _pid_is_our_daemon(pid):
+    """pid 对应的进程是否本程序的守护进程（按 exe 映像名判断）。
+
+    背景：开机级/登录级/手动启动可能叠加，单实例保护靠 daemon.pid 记录的 pid。
+    但 Windows 重启/注销后 pid 文件会残留上一代的 pid，若该 pid 恰好被系统其他进程
+    复用，仅靠"进程是否存在"会误判"已有实例"，让新守护直接退出（表现为重启后
+    后台服务起不来）。因此除进程存在外，还校验其映像名是否为本程序
+    （CampusLogin.exe / 校园网自动登录.exe）。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = k32.OpenProcess(0x1000, False, pid)
+        if not h:
+            return False   # 进程不存在或无权限访问 → 视为残留 pid，新实例可接管
+        try:
+            buf = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buf))
+            if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                name = os.path.basename(buf.value).lower()
+                return name in ("campuslogin.exe", "校园网自动登录.exe")
+            return True    # 进程存在但取不到路径 → 保守视为"已在运行"
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return True
+
+
 def main_loop():
     setup_logging()
     # ---- 单实例保护 ----------------------------------------------------
     # 场景：开机级任务 + 登录级任务 + 用户手动启动，三者可能叠加。
     # 若不做保护会跑出多个守护进程，同时向门户发登录请求，反而互相把对方踢下线。
+    # 注意：pid 文件里的 pid 必须"确实是本程序在跑"才算已运行——Windows 重启后
+    # daemon.pid 会残留旧 pid，若该 pid 被系统其他进程复用，仅 OpenProcess 判断
+    # "进程存在"会误判已运行，导致新守护自杀、后台服务起不来。
     running_pid = core.daemon_pid()
-    if core.is_daemon_running() and running_pid != os.getpid():
+    if running_pid and running_pid != os.getpid() and _pid_is_our_daemon(running_pid):
         log.info("[系统] 守护进程已在运行（pid=%s），本实例直接退出，避免重复登录", running_pid)
         return
     core.write_pid()
