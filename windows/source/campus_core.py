@@ -21,10 +21,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from datetime import datetime
 
-APP_VERSION = "1.2.0"   # 正式版号（内部迭代 v1.2.1~v1.2.13 的修复已全部并入本版）
+APP_VERSION = "1.2.0"   # 应用版本号（显示在设置页脚与 exe 文件属性里）
 APP_NAME = "校园网自动登录"
 
 # 数据目录：源码运行时 = 本文件所在目录；
@@ -516,22 +515,25 @@ def daemon_pid():
 
 
 # ----------------------------------------------------------------------
-# 开机自启管理（计划任务双轨制）
+# 自启管理
 # ----------------------------------------------------------------------
-# 为什么要从「注册表 Run 键」换成「计划任务」：
-#   Run 键要等用户登录完成、桌面就绪后才触发，且 Windows 10/11 对启动项有
-#   内建错峰延迟，用户体感就是"开机半天才连上网"。计划任务的 ONLOGON 触发器
-#   在登录流程早期就触发，且可用 /delay 0000:00 显式取消延迟，免管理员权限。
+# 两档自启（当前实现）：
+#   1) 「后台服务」登录后自启 —— 把启动器 .cmd 放进用户「启动」文件夹
+#      （%APPDATA%\...\Startup），登录 Windows 后自动执行并拉起守护进程。
+#      用户级操作，免管理员、不弹 UAC；比注册表 Run 早（不经 Windows 启动项错峰延迟）。
+#   2) 「极速启动」—— 系统计划任务 BOOT_TASK（/sc ONSTART、SYSTEM 身份），
+#      开机即启动、锁屏状态下也在后台运行；创建/删除需管理员授权一次。
 #
-# 两档：
-#   登录级 AUTOSTART_TASK（/sc ONLOGON）—— 免管理员，登录后立即启动。默认档。
-#   开机级 BOOT_TASK     （/sc ONSTART）—— 需管理员一次性授权，开机即启动，
-#                                          锁屏状态下就已经在后台运行。
+# 历史：早期用注册表 Run 键，后改为登录级计划任务 AUTOSTART_TASK（CampusAutoLogin），
+# 现登录后自启统一由「启动」文件夹 .cmd 实现，AUTOSTART_TASK 不再创建
+# （常量仅作卸载兼容清理保留）。
 # ----------------------------------------------------------------------
-AUTOSTART_TASK = "CampusAutoLogin"       # 登录级计划任务名（v1.2.12 起改用 Startup 文件夹方案，此名仅作历史兼容保留）
+AUTOSTART_TASK = "CampusAutoLogin"       # 登录级计划任务名（历史遗留，仅作卸载兼容清理）
 BOOT_TASK = "CampusAutoLoginBoot"        # 开机级任务名
-_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-_RUN_NAME = "CampusAutoLogin"            # 旧版（<= v1.1.0）遗留的注册表项名
+
+# 「登录后自动运行后台服务」的启动器：放在用户级 Startup 文件夹，
+# 登录 Windows 后由 Windows 自动执行。比注册表 Run 早（不经过 Windows 启动项延迟），
+# 比 schtasks ONLOGON 可靠（无需 UAC/无需 schtasks，普通用户权限即可读写）。
 
 # 「登录后自动运行后台服务」的启动器：放在用户级 Startup 文件夹，
 # 登录 Windows 后由 Windows 自动执行。比注册表 Run 早（不经过 Windows 启动项延迟），
@@ -543,7 +545,7 @@ _STARTUP_AUTOSTART_CMD = os.path.join(_STARTUP_DIR, "校园网自动登录.cmd")
 # 极速启动（开机级）的开关状态文件：由创建/删除成功的提权子进程（管理员）写入。
 # 为什么不用 schtasks /query 作主判据？——Windows Task Scheduler 服务在不同完整性级别间
 # 存在同步/可见性差异，非管理员父进程的 `schtasks /query` 往往查不到刚由管理员创建的
-# SYSTEM 任务，导致指示灯/勾选框被反复刷回"未开启"（v1.2.9 之前的表象）。本程序是任务的
+# SYSTEM 任务，导致指示灯/勾选框被反复刷回"未开启"。本程序是任务的
 # 唯一管理方，因此以"自己写入的开关状态"为权威来源，schtasks 仅在状态文件缺失时回退查询。
 BOOT_TASK_STATE = os.path.join(APP_DIR, "boot_task.json")
 
@@ -627,19 +629,6 @@ def _task_delete(name):
     return rc == 0
 
 
-def _cleanup_legacy_run_key():
-    """清理旧版遗留的注册表 Run 键，避免与计划任务双重启动守护进程"""
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
-            try:
-                winreg.DeleteValue(k, _RUN_NAME)
-            except FileNotFoundError:
-                pass
-    except Exception:
-        pass
-
-
 def autostart_enabled():
     """登录级自启（免管理员）是否已开启：通过启动文件夹里的启动器是否存在判定。
 
@@ -688,7 +677,7 @@ def boot_task_enabled():
     权威来源是本程序自维护的 boot_task.json 状态文件（创建/删除成功时由提权进程写入）。
     为什么不用 schtasks /query 作主判据：Windows Task Scheduler 服务在不同完整性级别间存在
     可见性差异，非管理员父进程的 /query 往往查不到刚由管理员创建的 SYSTEM 任务——若以它
-    为准，指示灯/勾选框会被反复刷回"未开启"（v1.2.9/1.2.10 持续出现的表象）。
+    为准，指示灯/勾选框会被反复刷回"未开启"。
     状态文件缺失（首次使用 / 旧版升级尚未写入）时才回退一次 schtasks 查询。
     """
     try:
