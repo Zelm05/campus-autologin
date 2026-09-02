@@ -15,7 +15,7 @@
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
 | Android | `release/Autologin-v1.0.3_release.apk` | 直接安装，覆盖更新保留账号密码；旧版 v1.0.1 仍保留在本目录 |
-| Windows | `release/Autologin_v1.1.0_x64_setup.exe` | 免管理员权限，支持覆盖升级 |
+| Windows | `release/Autologin_v1.2.0_x64_setup.exe` | 免管理员权限，支持覆盖升级；v1.2.0 支持「极速启动」（开机即启动、锁屏也运行） |
 
 > 新版 Android APK 也可通过 GitHub Actions 自动构建：打 `v*` 标签 → Release 页面获取。
 
@@ -29,7 +29,7 @@ campus-autologin/
 ├── windows/
 │   └── source/             # Windows 桌面版源码（Python + pywebview）
 │       ├── app.py · campus_core.py · daemon.py · gui.py · config.json
-│       ├── requirements.txt · README.md · 使用说明.txt · 启动设置.bat · 重建说明.txt
+│       ├── requirements.txt · README.md · 使用说明.txt · 启动设置.bat
 │       └── build/          # 打包配置：CampusLogin.spec · icon.ico · setup.iss · version_info.txt
 ├── release/                # 可下载的安装包（APK / EXE）
 ├── screenshots/            # README 界面截图

@@ -17,6 +17,7 @@ daemon.py —— 后台守护进程（无任何窗口/弹窗）
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -52,6 +53,26 @@ def setup_logging():
 
 
 log = logging.getLogger("daemon")
+
+
+# ----------------------------------------------------------------------
+# 启动加速
+# ----------------------------------------------------------------------
+def raise_priority():
+    """把守护进程优先级提到「高于正常」。
+
+    开机瞬间系统负载最高（杀软扫描、更新、各类启动项抢跑），后台守护若不提权
+    很容易被挤在后面排队。这里只提到 ABOVE_NORMAL（而非 HIGH），
+    既能在开机时抢到调度，又不会影响用户前台操作的流畅度。
+    """
+    try:
+        import ctypes
+        ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+        k32 = ctypes.windll.kernel32
+        k32.SetPriorityClass(k32.GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS)
+        log.info("[系统] 进程优先级已提升为「高于正常」")
+    except Exception as e:
+        log.debug("[系统] 提升进程优先级失败（不影响运行）：%s", e)
 
 
 # ----------------------------------------------------------------------
@@ -137,7 +158,15 @@ def attempt_login(cfg, qs, portal_base, reason="掉线"):
 # ----------------------------------------------------------------------
 def main_loop():
     setup_logging()
+    # ---- 单实例保护 ----------------------------------------------------
+    # 场景：开机级任务 + 登录级任务 + 用户手动启动，三者可能叠加。
+    # 若不做保护会跑出多个守护进程，同时向门户发登录请求，反而互相把对方踢下线。
+    running_pid = core.daemon_pid()
+    if core.is_daemon_running() and running_pid != os.getpid():
+        log.info("[系统] 守护进程已在运行（pid=%s），本实例直接退出，避免重复登录", running_pid)
+        return
     core.write_pid()
+    raise_priority()
     log.info("=" * 60)
     log.info("[系统] %s v%s 守护进程启动 (pid=%s, Python %s)",
              core.APP_NAME, core.APP_VERSION, os.getpid(), sys.version.split()[0])
@@ -147,19 +176,33 @@ def main_loop():
              cfg0.get("service") or "<空>", cfg0.get("interval", 15),
              cfg0.get("portal_base", core.DEFAULT_PORTAL_BASE))
     log.info("[配置] 探针链：%s", ", ".join(cfg0.get("probe_urls") or core.DEFAULT_PROBE_URLS))
-    # 启动时若配置了校园网 SSID 且未连接，自动连接
-    ready, wifi_msg = core.ensure_campus_wifi(cfg0)
-    log.info("[WiFi] %s", wifi_msg)
+    # ---- WiFi 自动连接改为后台线程 --------------------------------------
+    # 原来这里是同步调用：netsh 扫描/连接最坏要 15+10+30 秒，全部阻塞主线程，
+    # 导致开机后几十秒才做第一次联网探测 —— 这是"开机自启慢"的主因之一。
+    # 挪到后台线程后，主线程立刻开始探测，两者并行。
+    def _wifi_worker():
+        try:
+            ready, wifi_msg = core.ensure_campus_wifi(cfg0)
+            log.info("[WiFi] %s", wifi_msg)
+        except Exception:
+            log.exception("[WiFi] 自动连接线程异常")
+    threading.Thread(target=_wifi_worker, daemon=True).start()
     log.info("=" * 60)
 
     last_state = None          # online / offline / unreachable
     heartbeat_at = 0.0         # 在线心跳：每小时记一条，证明进程活着
     login_ok_until = 0.0       # 登录成功后 60 秒内不再触发重复登录
+    start_at = time.time()     # 启动时刻：用于"抢跑期"判定
 
     try:
         while True:
             cfg = core.load_config()
             interval = max(5, int(cfg.get("interval", 15)))
+            # 启动后前 60 秒为"抢跑期"：用 5 秒短间隔轮询。
+            # 开机时网卡/WiFi 尚未就绪，若一上来就按 15 秒间隔睡，
+            # 网络刚通那一刻可能要白等十几秒才被发现。
+            if time.time() - start_at < 60:
+                interval = min(interval, 5)
 
             r = core.probe(cfg.get("probe_urls"))
             now = time.time()
@@ -200,9 +243,12 @@ def main_loop():
 
 
 def run_once():
-    """单次模式：探测一轮 + 必要时登录一次（调试用，exe 的 --once 也走这里）"""
+    """单次模式：探测一轮 + 必要时登录一次（调试用，exe 的 --once 也走这里）
+
+    注意：这里刻意不写 daemon.pid —— 单次测试不拥有守护进程的所有权，
+    若覆盖会把正在运行的守护进程的 pid 弄丢，导致"停止后台服务"失效。
+    """
     setup_logging()
-    core.write_pid()
     cfg = core.load_config()
     r = core.probe(cfg.get("probe_urls"))
     if r.online:
@@ -213,7 +259,6 @@ def run_once():
     else:
         log.warning("[单次模式] 未联网且未捕获门户参数：%s", r.detail)
         core.write_status(state="网络不可达（未捕获门户参数）", last_error=r.detail)
-    core.remove_pid()
 
 
 if __name__ == "__main__":

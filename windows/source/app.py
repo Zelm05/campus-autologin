@@ -13,8 +13,31 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
+def _report(ok, msg):
+    """提权子进程的结果回显：既打印（便于排查），也弹窗（否则窗口一闪而过）"""
+    print(msg)
+    try:
+        import ctypes
+        # 0x40 = MB_ICONINFORMATION / 0x10 = MB_ICONWARNING
+        ctypes.windll.user32.MessageBoxW(None, msg, "校园网自动登录",
+                                         0x40 if ok else 0x10)
+    except Exception:
+        pass
+
+
 def main():
-    if "--daemon" in sys.argv:
+    # 以下两个分支由 UAC 提权后的子进程执行（创建/删除开机级计划任务需要管理员）
+    if "--enable-boot-task" in sys.argv:
+        import campus_core as core
+        ok, msg = core.set_boot_task(True)
+        _report(ok, msg)
+        sys.exit(0 if ok else 1)
+    elif "--disable-boot-task" in sys.argv:
+        import campus_core as core
+        ok, msg = core.set_boot_task(False)
+        _report(ok, msg)
+        sys.exit(0 if ok else 1)
+    elif "--daemon" in sys.argv:
         # 后台守护：绝不弹窗
         import daemon
         daemon.main_loop()

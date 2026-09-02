@@ -8,7 +8,7 @@ gui.py —— 校园网自动登录 设置界面
 
 页面功能：
   - 修改账号 / 密码 / 服务 / 检测间隔 / 认证服务器
-  - 开机自启开关（写注册表 HKCU Run，静默启动后台守护）
+  - 极速启动开关（计划任务：开机即启动、锁屏时也在后台运行，需管理员授权一次）
   - 立即测试登录（探测 + 掉线时走完整登录流程，显示服务器原始响应）
   - 启动 / 停止后台服务、查看实时日志
   - 30 分钟无操作自动退出，不留后台残留
@@ -17,19 +17,34 @@ gui.py —— 校园网自动登录 设置界面
 import json
 import logging
 import os
+import secrets
 import sys
 import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import campus_core as core  # noqa: E402
 APP_DIR = core.APP_DIR
 
-PORT = 8765
-RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-AUTOSTART_NAME = "CampusAutoLogin"
+# ----------------------------------------------------------------------
+# 本地端口：动态分配，不再固定 8765
+# ----------------------------------------------------------------------
+# 问题背景（用户反馈"本地部署了其他网站，打开本软件却显示那个网站的内容"）：
+#   Windows 上 SO_REUSEADDR 的语义是"允许抢占已被绑定的端口"（与 Unix 的
+#   TIME_WAIT 复用语义不同）。而 Python 的 HTTPServer 默认 allow_reuse_address=1。
+#   于是当用户本地部署的其他网站先占用了同一端口时，本程序"绑定成功"不报错，
+#   但发往该端口的连接被先绑定者抢走，WebView2 渲染出来的就成了别人的网站。
+# 三重对策：
+#   ① 端口交给系统分配（bind 到 0），从根本上不与任何本地站点冲突；
+#   ② 关闭 SO_REUSEADDR，真冲突时能立刻报错，而不是静默串台；
+#   ③ 每次启动生成随机令牌，页面与所有接口都校验，杜绝被其他站点顶替。
+GUI_PORT_FILE = os.path.join(core.APP_DIR, "gui.port")
+GUI_URL_FILE = os.path.join(core.APP_DIR, "gui.url")   # 纯文本 URL，供 启动设置.bat 直接读取
+_ACCESS_TOKEN = secrets.token_hex(16)   # 每次启动随机，仅本进程知晓
+
 log = logging.getLogger("gui")
 _last_activity = time.time()
 _main_window = None  # /api/quit 用来关闭 webview 窗口，避免直接 os._exit 导致 _MEI 临时目录无法清理
@@ -37,39 +52,122 @@ _QUITTING = False    # 标记程序是否已进入退出流程；进入后关闭
 
 
 # ----------------------------------------------------------------------
-# 注册表自启
+# 本地服务的单实例管理
 # ----------------------------------------------------------------------
-def autostart_command():
-    """开机自启命令：exe 模式 → 自身加 --daemon；源码模式 → pythonw 跑 daemon.py"""
-    if getattr(sys, "frozen", False):
-        return '"%s" --daemon' % sys.executable
-    exe = sys.executable
-    pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
-    if os.path.exists(pythonw):
-        exe = pythonw
-    return '"%s" "%s"' % (exe, os.path.join(APP_DIR, "daemon.py"))
+def _instance_url(port):
+    return "http://127.0.0.1:%s/?k=%s" % (port, _ACCESS_TOKEN)
 
 
-def autostart_enabled():
+def _write_port_file(port):
+    """记录本实例端口，供 启动设置.bat 与其他实例复用。返回本实例 URL"""
+    url = _instance_url(port)
     try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-            winreg.QueryValueEx(k, AUTOSTART_NAME)
-            return True
-    except (FileNotFoundError, OSError):
+        with open(GUI_PORT_FILE, "w", encoding="utf-8") as f:
+            json.dump({"port": port, "token": _ACCESS_TOKEN, "pid": os.getpid()}, f)
+        # 单独写一份纯文本 URL，批处理脚本无需解析 JSON 即可直接取用
+        with open(GUI_URL_FILE, "w", encoding="utf-8") as f:
+            f.write(url)
+    except Exception as e:
+        log.warning("[启动] 写入端口文件失败：%s", e)
+    return url
+
+
+def _read_port_file():
+    try:
+        with open(GUI_PORT_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _clear_port_file():
+    for p in (GUI_PORT_FILE, GUI_URL_FILE):
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+
+
+def _api_is_ours(port, token):
+    """确认该端口上的服务确实属于本程序。
+
+    仅"能连上"是不够的：用户本地部署的其他网站也可能对 /api/status 返回 200
+    （例如 SPA 开发服务器把所有路径都回落到 index.html），因此必须校验身份标识。
+    """
+    try:
+        import urllib.request
+        url = "http://127.0.0.1:%s/api/status?k=%s" % (port, token)
+        req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return isinstance(data, dict) and data.get("app_name") == core.APP_NAME
+    except Exception:
         return False
 
 
-def set_autostart(enable):
-    import winreg
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
-        if enable:
-            winreg.SetValueEx(k, AUTOSTART_NAME, 0, winreg.REG_SZ, autostart_command())
+def _focus_existing():
+    """已有设置窗口在运行时把它提到前台复用。返回 True 表示本实例应直接退出。"""
+    d = _read_port_file()
+    if not d or not _api_is_ours(d.get("port"), d.get("token")):
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        user32.FindWindowW.restype = ctypes.c_void_p
+        user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+        hwnd = user32.FindWindowW(None, "校园网自动登录 - 设置")
+        if hwnd:
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)      # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
         else:
-            try:
-                winreg.DeleteValue(k, AUTOSTART_NAME)
-            except FileNotFoundError:
-                pass
+            # 原生窗口没找到（源码模式可能是浏览器页面），直接把页面再打开一次
+            import webbrowser
+            webbrowser.open(_instance_url(d["port"]))
+    except Exception:
+        pass
+    log.info("[启动] 已有设置窗口在运行（端口 %s），已将其置前", d.get("port"))
+    return True
+
+
+# ----------------------------------------------------------------------
+# 开机自启（委托 campus_core 的计划任务双轨实现）
+# ----------------------------------------------------------------------
+def autostart_enabled():
+    """登录级自启是否已开启（免管理员）"""
+    return core.autostart_enabled()
+
+
+def set_autostart(enable):
+    """开启/关闭登录级自启（免管理员）"""
+    ok, msg = core.set_autostart(enable)
+    if not ok:
+        raise OSError(msg)
+    log.info("[自启] 登录级（登录后立即启动）-> %s", "开启" if enable else "关闭")
+
+
+def boot_task_enabled():
+    """开机级自启是否已开启（开机即启动、锁屏时也运行）"""
+    return core.boot_task_enabled()
+
+
+def set_boot_task(enable):
+    """开启/关闭开机级自启。返回 (ok, 说明)
+
+    开机级任务以 SYSTEM 身份运行，创建/删除都需要管理员权限。
+    当前进程不是管理员时，弹 UAC 提权重启自身处理，界面只需提示用户确认。
+    """
+    ok, msg = core.set_boot_task(enable)
+    if ok:
+        log.info("[自启] 开机级（开机即启动、锁屏也运行）-> %s", "开启" if enable else "关闭")
+        return True, msg
+    if not core.is_admin():
+        arg = "--enable-boot-task" if enable else "--disable-boot-task"
+        if core.elevate_self(arg):
+            return True, "已请求管理员授权，请在弹出的 UAC 窗口中确认"
+        return False, "无法获取管理员授权"
+    return False, msg
 
 
 # ----------------------------------------------------------------------
@@ -99,6 +197,8 @@ def api_status():
         "login_count": st.get("login_count", 0),
         "daemon_running": core.is_daemon_running(),
         "autostart": autostart_enabled(),
+        "boot_task": boot_task_enabled(),   # 开机级自启（开机即启动、锁屏也运行）
+        "is_admin": core.is_admin(),        # 前端据此决定是否需要提示 UAC
         "username": username,
         "username_masked": core.mask_username(username),
         "has_password": bool(core.get_password(cfg)),
@@ -128,14 +228,9 @@ def api_save(data):
         cfg["portal_base"] = str(data.get("portal_base", "")).strip() or core.DEFAULT_PORTAL_BASE
     if "campus_ssid" in data:
         cfg["campus_ssid"] = str(data.get("campus_ssid", "")).strip()
-    cfg["autostart"] = bool(data.get("autostart", False))
     core.save_config(cfg)
-    try:
-        set_autostart(bool(data.get("autostart", False)))
-    except OSError as e:
-        return {"ok": False, "error": "写入开机自启失败：%s" % e}
-    log.info("设置已保存：用户名=%s 服务=%s 间隔=%ss 自启=%s 校园网SSID=%s",
-             cfg["username"], cfg["service"], cfg["interval"], cfg["autostart"], cfg.get("campus_ssid", ""))
+    log.info("设置已保存：用户名=%s 服务=%s 间隔=%ss 校园网SSID=%s",
+             cfg["username"], cfg["service"], cfg["interval"], cfg.get("campus_ssid", ""))
     return {"ok": True}
 
 
@@ -193,9 +288,43 @@ def api_log():
 # ----------------------------------------------------------------------
 # HTTP 服务
 # ----------------------------------------------------------------------
+class LocalServer(ThreadingHTTPServer):
+    """本地设置服务。
+
+    关键：关闭 SO_REUSEADDR。
+    在 Windows 上开启该选项意味着"允许抢占别人已绑定的端口"，本程序会以为自己
+    绑定成功，实际连接却被真正的占用者（用户本地部署的其他网站）截走。
+    关掉之后，端口真被占用时会立刻抛 OSError，我们能明确报错而不是静默串台。
+    """
+    allow_reuse_address = False
+    daemon_threads = True
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # 静默，不写控制台
         pass
+
+    def _authorized(self):
+        """校验随机令牌：确认是本程序自己的页面在访问，而非本地其他站点"""
+        q = parse_qs(urlsplit(self.path).query)
+        return q.get("k", [""])[0] == _ACCESS_TOKEN
+
+    def _deny(self):
+        """令牌不匹配时返回明确的拒绝页，绝不渲染成其他内容"""
+        body = (
+            "<!DOCTYPE html><html lang='zh-CN'><meta charset='utf-8'>"
+            "<title>403 拒绝访问</title>"
+            "<body style='font-family:Microsoft YaHei;padding:40px;line-height:1.8'>"
+            "<h3>403 拒绝访问</h3>"
+            "<p>此地址仅限「校园网自动登录」程序自身访问。</p>"
+            "<p>请直接双击桌面快捷方式打开本程序。</p>"
+            "</body></html>").encode("utf-8")
+        self.send_response(403)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -209,8 +338,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         global _last_activity
         _last_activity = time.time()
-        if self.path == "/" or self.path.startswith("/index"):
-            body = PAGE_HTML.encode("utf-8")
+        path = urlsplit(self.path).path
+        if path == "/" or path.startswith("/index"):
+            if not self._authorized():
+                return self._deny()
+            # 注入本次启动的随机令牌，页面内所有请求会自动带上
+            body = PAGE_HTML.replace("__TOKEN__", _ACCESS_TOKEN).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -220,9 +353,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Expires", "0")
             self.end_headers()
             self.wfile.write(body)
-        elif self.path == "/api/status":
+        elif path == "/api/status":
+            if not self._authorized():
+                return self._json({"error": "forbidden"}, 403)
             self._json(api_status())
-        elif self.path == "/api/log":
+        elif path == "/api/log":
+            if not self._authorized():
+                return self._json({"error": "forbidden"}, 403)
             self._json(api_log())
         else:
             self._json({"error": "not found"}, 404)
@@ -230,30 +367,37 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global _last_activity
         _last_activity = time.time()
+        path = urlsplit(self.path).path
+        if not self._authorized():
+            return self._json({"ok": False, "error": "forbidden"}, 403)
         try:
             length = int(self.headers.get("Content-Length", "0"))
             data = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
         except Exception:
             return self._json({"ok": False, "error": "请求体解析失败"}, 400)
 
-        if self.path == "/api/save":
+        if path == "/api/save":
             self._json(api_save(data))
-        elif self.path == "/api/test":
+        elif path == "/api/test":
             self._json(api_test())
-        elif self.path == "/api/daemon/start":
+        elif path == "/api/daemon/start":
             ok, msg = core.start_daemon()
             self._json({"ok": ok, "message": msg})
-        elif self.path == "/api/daemon/stop":
+        elif path == "/api/daemon/stop":
             ok, msg = core.stop_daemon()
             self._json({"ok": ok, "message": msg})
-        elif self.path == "/api/openlog":
+        elif path == "/api/boottask":
+            # 开机级自启：开机即启动、锁屏状态下也在后台运行（需管理员授权）
+            ok, msg = set_boot_task(bool(data.get("enable", False)))
+            self._json({"ok": ok, "message": msg})
+        elif path == "/api/openlog":
             try:
                 os.makedirs(core.LOG_DIR, exist_ok=True)
                 os.startfile(core.LOG_DIR)
                 self._json({"ok": True})
             except OSError as e:
                 self._json({"ok": False, "error": str(e)})
-        elif self.path == "/api/quit":
+        elif path == "/api/quit":
             self._json({"ok": True})
             global _QUITTING
             _QUITTING = True  # 进入退出流程：关闭回调不再拦截/弹窗，让窗口正常销毁
@@ -374,15 +518,18 @@ PAGE_HTML = r"""<!DOCTYPE html>
     font-size: 12px; padding: 4px 10px; border-radius: 999px;
     background: var(--accent-soft); color: var(--accent); }
   .row { display: flex; align-items: center; gap: 10px; margin: 5px 0; }
-  .row label { width: 96px; font-size: 13px; color: var(--muted); flex-shrink: 0; }
+  /* 只约束行首的字段名 label（直接子元素）；否则会误伤选项用的 <label class="chk">，
+     把复选框文字压进 96px 里导致每行只挤两三个字 */
+  .row > label { width: 96px; font-size: 13px; color: var(--muted); flex-shrink: 0; }
   .row input[type=text], .row input[type=password] {
     flex: 1; min-width: 0; padding: 7px 11px;
     border: 1px solid var(--line2); border-radius: 8px;
     font-size: 14px; background: var(--card); color: var(--text);
   }
   .chkrow { align-items: flex-start; }
-  .chk { display: flex; align-items: center; gap: 6px; font-size: 13px; }
-  .chk input { width: 15px; height: 15px; accent-color: var(--accent); }
+  .chk { display: flex; align-items: flex-start; gap: 6px; font-size: 13px; line-height: 1.5; }
+  .chk input { width: 15px; height: 15px; accent-color: var(--accent); flex-shrink: 0; margin-top: 3px; }
+  .chkrow > div { flex: 1; min-width: 0; }
   .card .actions { display: flex; gap: 8px; margin-top: 10px; flex-shrink: 0; }
   .btn { padding: 8px 16px; border: none; border-radius: 8px; font-size: 13px;
     cursor: pointer; font-weight: 500; }
@@ -514,7 +661,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
         <div class="row"><label>认证服务器</label><input type="text" id="portal_base"></div>
         <div class="row"><label>校园网 WiFi</label><input type="text" id="campus_ssid" placeholder="例如：CQUST-T（也可勾选自动连接）"></div>
         <div class="row chkrow"><label>开机自启</label>
-          <div><label class="chk"><input type="checkbox" id="autostart"> 开机自启</label></div>
+          <div>
+            <label class="chk"><input type="checkbox" id="boot_task" onchange="onBootTaskChange()"> 极速启动（开机即自动联网，锁屏时也在后台运行）</label>
+          </div>
         </div>
         <div class="actions">
           <button class="btn primary" onclick="save()">💾 保存设置</button>
@@ -537,7 +686,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
           <div class="chip"><div class="ico net">📡</div><div><div class="k">网络</div><div class="v"><span class="dot unk" id="d_net"></span><span id="net">检测中…</span></div></div></div>
           <div class="chip"><div class="ico wifi">📶</div><div><div class="k">WiFi</div><div class="v"><span class="dot unk" id="d_wifi"></span><span id="wifi" title="">未连接</span></div></div></div>
           <div class="chip"><div class="ico daemon">⚙</div><div><div class="k">后台服务</div><div class="v"><span class="dot unk" id="d_daemon"></span><span id="daemon">检测中…</span></div></div></div>
-          <div class="chip"><div class="ico auto">🔁</div><div><div class="k">开机自启</div><div class="v"><span class="dot unk" id="d_auto"></span><span id="autostart">--</span></div></div></div>
+          <div class="chip"><div class="ico auto">🚀</div><div><div class="k">极速启动</div><div class="v"><span class="dot unk" id="d_boot"></span><span id="boot_task_state">--</span></div></div></div>
           <div class="chip"><div class="ico ssid">🎯</div><div><div class="k">校园网</div><div class="v"><span id="campus">未配置</span></div></div></div>
           <div class="chip"><div class="ico count">✓</div><div><div class="k">自动登录次数</div><div class="v"><span id="logincnt">0 次</span></div></div></div>
         </div>
@@ -580,9 +729,15 @@ let initialFilled = false;
 let logAuto = true;
 const $ = id => document.getElementById(id);
 
+// 本次启动的随机令牌（由服务端渲染时注入）。
+// 所有请求都带上它：既能防止用户本地部署的其他网站顶替本程序页面，
+// 也能阻止外部网页跨域驱动本程序的接口。
+const TOKEN = '__TOKEN__';
+function tok(p) { return p + (p.indexOf('?') >= 0 ? '&' : '?') + 'k=' + TOKEN; }
+
 async function api(path, body) {
   const opt = body ? {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)} : {};
-  const r = await fetch(path, opt);
+  const r = await fetch(tok(path), opt);
   return r.json();
 }
 
@@ -599,8 +754,8 @@ function refreshStatus() {
     $('net').textContent = s.state;
     setChip($('d_daemon'), s.daemon_running);
     $('daemon').textContent = s.daemon_running ? '运行中' : '未运行';
-    setChip($('d_auto'), s.autostart);
-    $('autostart').textContent = s.autostart ? '已开启' : '未开启';
+    setChip($('d_boot'), s.boot_task);
+    $('boot_task_state').textContent = s.boot_task ? '已开启' : '未开启';
     // WiFi 状态
     const wifi = $('wifi'), dWifi = $('d_wifi');
     if (s.wifi_status === 'right') { setChip(dWifi, true); wifi.textContent = s.wifi_ssid; wifi.title = '已连到校园网'; }
@@ -617,7 +772,7 @@ function refreshStatus() {
       $('interval').value = s.interval;
       $('portal_base').value = s.portal_base;
       $('campus_ssid').value = s.campus_ssid || '';
-      $('autostart').checked = s.autostart;
+      $('boot_task').checked = s.boot_task;
       initialFilled = true;
     }
     $('password').placeholder = s.has_password ? '已保存（留空则不修改）' : '请输入密码';
@@ -648,14 +803,13 @@ function save() {
   const body = {
     username: $('username').value, service: $('service').value,
     interval: $('interval').value, portal_base: $('portal_base').value,
-    campus_ssid: $('campus_ssid').value,
-    autostart: $('autostart').checked, password: $('password').value
+    campus_ssid: $('campus_ssid').value, password: $('password').value
   };
   api('/api/save', body).then(r => {
     const m = $('save_msg');
     if (r.ok) {
       m.className = 'msg ok';
-      m.textContent = '已保存 ✓' + (body.autostart ? '（开机自启已开启，重启后自动生效）' : '');
+      m.textContent = '已保存 ✓';
       $('password').value = '';
     } else {
       m.className = 'msg err';
@@ -663,6 +817,42 @@ function save() {
     }
     refreshStatus();
   });
+}
+
+// 极速启动：走独立接口。勾选后会弹 UAC，真正的任务创建/删除由提权子进程
+// 异步完成，所以这里轮询真实状态（最多 30 秒）、以任务是否实际存在为准
+// 更新「运行情况」卡片，避免"勾了但卡片一直显示未开启"的不同步。
+async function onBootTaskChange() {
+  const want = $('boot_task').checked;
+  const m = $('save_msg');
+  const r = await api('/api/boottask', {enable: want});
+  if (!r.ok) {                            // 直接失败（如 UAC 被取消）
+    m.className = 'msg err';
+    m.textContent = '设置失败：' + (r.message || '未知错误');
+    $('boot_task').checked = !want;       // 回滚勾选
+    refreshStatus();
+    return;
+  }
+  m.className = 'msg ok';
+  m.textContent = want ? '正在等待管理员授权…（请在 UAC 窗口点「是」）' : '正在关闭…';
+  let last = null;
+  for (let i = 0; i < 30; i++) {          // 每秒查一次真实任务状态
+    await new Promise(res => setTimeout(res, 1000));
+    last = await api('/api/status');
+    setChip($('d_boot'), last.boot_task);
+    $('boot_task_state').textContent = last.boot_task ? '已开启' : '未开启';
+    if (last.boot_task === want) {
+      m.className = 'msg ok';
+      m.textContent = want ? '极速启动已开启 ✓（重启电脑后生效）' : '极速启动已关闭';
+      refreshStatus();
+      return;
+    }
+  }
+  // 超时：按真实状态回滚勾选，提示重试
+  m.className = 'msg err';
+  m.textContent = '等待授权超时，请重试（注意确认弹出的 UAC 窗口）';
+  $('boot_task').checked = last ? last.boot_task : !want;
+  refreshStatus();
 }
 
 function testLogin() {
@@ -697,7 +887,7 @@ async function tryQuit() {
   if (_quitting) return;        // 正在退出，忽略（含窗口销毁触发的 FormClosing 回调）
   if (_quitDialogOpen) return;
   const s = await api('/api/status');
-  if (!s.daemon_running && !s.autostart) {
+  if (!s.daemon_running && !s.boot_task) {
     _quitting = true;
     _quitDialogOpen = true;
     confirmQuit();
@@ -708,9 +898,9 @@ async function tryQuit() {
     { key: '后台服务', on: s.daemon_running,
       onText: '运行中', offText: '已停止',
       desc: '常驻后台、掉线自动登录' },
-    { key: '开机自启', on: s.autostart,
+    { key: '极速启动', on: s.boot_task,
       onText: '已开启', offText: '已关闭',
-      desc: '登录 Windows 后自动启动后台' }
+      desc: '开机即启动，锁屏时也在后台运行' }
   ];
   let html = '';
   for (const r of rows) {
@@ -897,31 +1087,40 @@ def main():
     """桌面 App 入口：优先 pywebview 原生窗口，失败兜底浏览器"""
     setup_gui_logging()
     log.info("[启动] 校园网自动登录 v%s 开始启动", core.APP_VERSION)
-    try:
-        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    except OSError as e:
-        # 端口被占用：可能已经有设置窗口在跑（之前的实例残留），而不是真的没反应
-        # 先快速探测一下 8765 是不是我们的服务
-        alive = False
-        try:
-            import urllib.request
-            urllib.request.urlopen("http://127.0.0.1:%s/api/status" % PORT, timeout=1).read()
-            alive = True
-        except Exception:
-            pass
-        log.info("设置服务已在运行（端口 %s 被占用），本实例直接退出", PORT)
-        if alive:
-            _show_error("校园网自动登录",
-                        "设置窗口已经在运行中（端口 %s 被占用）。\n\n"
-                        "请到任务栏/任务管理器检查是否已有一个校园网自动登录窗口。\n"
-                        "如果没有，请右键 → 结束任务，再重新双击。" % PORT)
-        else:
-            _show_error("校园网自动登录",
-                        "端口 %s 被其他程序占用，无法启动设置窗口。\n\n"
-                        "错误：%s\n\n"
-                        "解决：找到占用该端口的程序并关闭，或重启电脑后再试。" % (PORT, e))
+
+    # 已有设置窗口在跑 → 直接把它提到前台，而不是再开一个（更不会串到别的站点）
+    if _focus_existing():
         return
-    log.info("设置界面服务启动：http://127.0.0.1:%s", PORT)
+
+    # 走到这里说明端口文件要么不存在、要么已失效（上次异常退出留下的）。
+    # 先清掉，这样 启动设置.bat 的轮询只会读到本实例刚写入的全新地址，
+    # 不会误开一个已经打不开的旧地址。
+    _clear_port_file()
+
+    # 旧版迁移：早先版本提供「登录级自启」（登录后启动，免管理员），
+    # 现已统一为「极速启动」（开机即启动、锁屏也运行）。
+    # 检测到旧登录级任务时自动移除，避免两套自启并存导致重复启动守护。
+    if core.autostart_enabled():
+        try:
+            core.set_autostart(False)
+            log.info("[自启] 检测到旧版登录级自启任务，已自动移除（现统一使用极速启动）")
+        except OSError as e:
+            log.warning("[自启] 清理旧版登录级自启任务失败：%s", e)
+
+    try:
+        # 端口传 0：由系统分配一个空闲端口。
+        # 固定端口会与用户本地部署的其他网站冲突，是本程序"显示成别的网站"的根因。
+        server = LocalServer(("127.0.0.1", 0), Handler)
+    except OSError as e:
+        log.exception("本地服务启动失败")
+        _show_error("校园网自动登录",
+                    "无法启动本地设置服务。\n\n错误：%s\n\n"
+                    "常见原因：安全软件拦截了本机的本地监听。\n"
+                    "可尝试把本程序加入杀毒白名单后重试。" % e)
+        return
+    port = server.server_address[1]
+    url = _write_port_file(port)
+    log.info("设置界面服务启动：%s", url)
     # 明确不干预后台：检测到后台服务在运行则只提示，绝不停止/重启它
     if core.is_daemon_running():
         log.info("[设置] 检测到后台服务运行中，设置界面不会停止/重启它，两者互不影响")
@@ -950,7 +1149,7 @@ def main():
             threading.Thread(target=_ask, daemon=True).start()
             return False  # 取消默认关闭，由 JS 决定是否退出
 
-        window = webview.create_window("校园网自动登录 - 设置", "http://127.0.0.1:%s" % PORT,
+        window = webview.create_window("校园网自动登录 - 设置", url,
                                        width=1180, height=760, min_size=(1000, 680))
         global _main_window
         _main_window = window
@@ -969,11 +1168,11 @@ def main():
         log.warning("无法打开桌面窗口（%s），改用浏览器兜底", e)
         _show_error("校园网自动登录",
                     "无法启动设置窗口（缺少 WebView2 或被杀毒拦截）。\n\n"
-                    "已改用浏览器打开 http://127.0.0.1:%s 。\n\n"
-                    "如频繁出现，可安装/更新 Edge WebView2 运行库，或将本程序加入杀毒白名单。" % PORT)
+                    "已改用浏览器打开本机设置页。\n\n"
+                    "如频繁出现，可安装/更新 Edge WebView2 运行库，或将本程序加入杀毒白名单。")
         try:
             import webbrowser
-            webbrowser.open("http://127.0.0.1:%s" % PORT)
+            webbrowser.open(url)
             opened = True
             server.serve_forever()
         except Exception:
@@ -987,7 +1186,17 @@ def main():
         # 给 pywebview 一点时间清理浏览器进程，避免关闭时挂住
         import time
         time.sleep(0.3)
+    _clear_port_file()
 
 
 if __name__ == "__main__":
+    # 源码模式下由 UAC 提权后的子进程执行（创建/删除开机级计划任务需管理员）
+    if "--enable-boot-task" in sys.argv:
+        ok, msg = core.set_boot_task(True)
+        print(msg)
+        sys.exit(0 if ok else 1)
+    if "--disable-boot-task" in sys.argv:
+        ok, msg = core.set_boot_task(False)
+        print(msg)
+        sys.exit(0 if ok else 1)
     main()

@@ -1,5 +1,5 @@
 ; ============================================================
-; 校园网自动登录 v1.1.0 安装脚本
+; 校园网自动登录 v1.2.0 安装脚本
 ; 默认安装到 D:\校园网自动登录，用户可在安装向导自由更改
 ; 编译：D:\inno\ISCC.exe build\setup.iss
 ;
@@ -12,7 +12,7 @@
 
 #define MyAppName "校园网自动登录"
 #define MyAppNameEn "CampusAutoLogin"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Zelm"
 #define MyAppCopyright "Copyright (C) 2026 Zelm"
 
@@ -117,10 +117,51 @@ begin
   end;
 end;
 
-// 卸载时一并清理开机自启注册表项（指向已删除的 exe 会造成开机报错）
+// 卸载时一并清理开机自启项（指向已删除的 exe 会造成开机报错）
+// v1.2：自启方式已从「注册表 Run 键」改为「计划任务」双轨制，
+//       登录级(CampusAutoLogin) 与 开机级(CampusAutoLoginBoot) 都要清理。
 procedure RemoveAutostart();
+var
+  RC: Integer;
 begin
+  // 旧版（<= v1.1.0）遗留的注册表项，兼容清理
   RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'CampusAutoLogin');
+  // 登录级任务：用户权限即可删除
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/delete /tn "CampusAutoLogin" /f', '',
+       SW_HIDE, ewWaitUntilTerminated, RC);
+  // 开机级任务：以 SYSTEM 身份创建，删除需要管理员。
+  // 卸载本身不要求管理员（PrivilegesRequired=lowest），此处仅尽力而为，失败不阻塞卸载。
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/delete /tn "CampusAutoLoginBoot" /f', '',
+       SW_HIDE, ewWaitUntilTerminated, RC);
+end;
+
+// 卸载时清理程序运行时生成的文件与日志。
+// 这些文件由 exe 在 {app} 目录下创建，不在 [Files] 段里，Inno 默认不会删除，
+// 不清除会导致卸载后安装目录残留 config.json、日志等。
+//
+// 注意：覆盖升级走的是“静默卸载”，此时应保留 config.json 和日志，避免用户重新填账号。
+// 手动（交互式）卸载才彻底清除所有数据。
+procedure CleanRuntimeFiles();
+var
+  AppDir: string;
+  Silent: Boolean;
+begin
+  AppDir := ExpandConstant('{app}');
+  Silent := UninstallSilent();
+
+  // 临时/端口状态类文件：无论静默/交互都清除，升级后会重建
+  DeleteFile(AppDir + '\daemon.pid');
+  DeleteFile(AppDir + '\status.json');
+  DeleteFile(AppDir + '\gui.port');
+  DeleteFile(AppDir + '\gui.url');
+
+  // 配置文件与日志：仅在用户手动卸载时彻底清除；覆盖升级时保留
+  if not Silent then
+  begin
+    DeleteFile(AppDir + '\config.json');
+    if DirExists(AppDir + '\logs') then
+      DelTree(AppDir + '\logs', True, True, True);
+  end;
 end;
 
 // 卸载时清理 C 盘产生的缓存：
@@ -179,6 +220,8 @@ begin
   StopBackgroundService();
   // 顺手清理开机自启项（仅在本程序自身的卸载流程里执行）
   RemoveAutostart();
+  // 清理运行时生成的 config/logs/pid/status/port/url 等文件
+  CleanRuntimeFiles();
   // 清理 C 盘 WebView2 / _MEI 等运行缓存
   CleanCaches();
 end;

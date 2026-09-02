@@ -14,7 +14,7 @@ Installers are in [`release/`](release/):
 | Platform | File | Notes |
 | --- | --- | --- |
 | Android | `release/Autologin-v1.0.3_release.apk` | Install directly; overwrite keeps your credentials. Older v1.0.1 is kept in this folder |
-| Windows | `release/Autologin_v1.1.0_x64_setup.exe` | No admin required; in-place upgrade supported |
+| Windows | `release/Autologin_v1.2.0_x64_setup.exe` | No admin required; in-place upgrade supported. v1.2.0 adds "Turbo Start": runs at boot, even on the lock screen |
 
 > New Android APKs are also built automatically via GitHub Actions: push a `v*` tag to get a signed APK from the Release page.
 
@@ -28,7 +28,7 @@ campus-autologin/
 ├── windows/
 │   └── source/             # Windows desktop app (Python + pywebview)
 │       ├── app.py · campus_core.py · daemon.py · gui.py · config.json
-│       ├── requirements.txt · README.md · 使用说明.txt · 启动设置.bat · 重建说明.txt
+│       ├── requirements.txt · README.md · 使用说明.txt · 启动设置.bat
 │       └── build/          # packaging: CampusLogin.spec · icon.ico · setup.iss · version_info.txt
 ├── release/                # downloadable installers (APK / EXE)
 ├── screenshots/            # UI screenshots for the README

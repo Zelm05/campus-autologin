@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
-APP_VERSION = "1.1.0"   # 应用版本号（显示在设置页脚与 exe 文件属性里）
+APP_VERSION = "1.2.0"   # 应用版本号（显示在设置页脚与 exe 文件属性里）
 APP_NAME = "校园网自动登录"
 
 # 数据目录：源码运行时 = 本文件所在目录；
@@ -503,3 +503,161 @@ def stop_daemon():
                    capture_output=True, creationflags=0x08000000)
     remove_pid()
     return True, "已停止 (pid=%s)" % pid
+
+
+def daemon_pid():
+    """读取 pid 文件中的守护进程号，不存在/损坏返回 None"""
+    try:
+        return int(open(PID_PATH).read().strip())
+    except Exception:
+        return None
+
+
+# ----------------------------------------------------------------------
+# 开机自启管理（计划任务双轨制）
+# ----------------------------------------------------------------------
+# 为什么要从「注册表 Run 键」换成「计划任务」：
+#   Run 键要等用户登录完成、桌面就绪后才触发，且 Windows 10/11 对启动项有
+#   内建错峰延迟，用户体感就是"开机半天才连上网"。计划任务的 ONLOGON 触发器
+#   在登录流程早期就触发，且可用 /delay 0000:00 显式取消延迟，免管理员权限。
+#
+# 两档：
+#   登录级 AUTOSTART_TASK（/sc ONLOGON）—— 免管理员，登录后立即启动。默认档。
+#   开机级 BOOT_TASK     （/sc ONSTART）—— 需管理员一次性授权，开机即启动，
+#                                          锁屏状态下就已经在后台运行。
+# ----------------------------------------------------------------------
+AUTOSTART_TASK = "CampusAutoLogin"       # 登录级任务名
+BOOT_TASK = "CampusAutoLoginBoot"        # 开机级任务名
+_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_NAME = "CampusAutoLogin"            # 旧版（<= v1.1.0）遗留的注册表项名
+
+
+def daemon_command():
+    """后台守护启动命令（计划任务与旧注册表项共用）"""
+    if getattr(sys, "frozen", False):
+        return '"%s" --daemon' % sys.executable
+    exe = sys.executable
+    pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    if os.path.exists(pythonw):
+        exe = pythonw
+    return '"%s" "%s"' % (exe, os.path.join(APP_DIR, "daemon.py"))
+
+
+def _run_cmd(cmd, timeout=25):
+    """执行命令（隐藏窗口），返回 (退出码, 合并输出文本)"""
+    import subprocess
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        out = (r.stdout or b"") + (r.stderr or b"")
+        for enc in ("utf-8", "gbk", "cp936", "utf-16", "latin1"):
+            try:
+                return r.returncode, out.decode(enc).strip()
+            except Exception:
+                continue
+        return r.returncode, out.decode("utf-8", errors="ignore")
+    except Exception as e:
+        return -1, "%s: %s" % (type(e).__name__, e)
+
+
+def is_admin():
+    """当前进程是否以管理员身份运行"""
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _task_exists(name):
+    rc, _ = _run_cmd(["schtasks", "/query", "/tn", name], timeout=12)
+    return rc == 0
+
+
+def _task_delete(name):
+    rc, _ = _run_cmd(["schtasks", "/delete", "/tn", name, "/f"], timeout=15)
+    return rc == 0
+
+
+def _cleanup_legacy_run_key():
+    """清理旧版遗留的注册表 Run 键，避免与计划任务双重启动守护进程"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            try:
+                winreg.DeleteValue(k, _RUN_NAME)
+            except FileNotFoundError:
+                pass
+    except Exception:
+        pass
+
+
+def autostart_enabled():
+    """登录级自启（免管理员）是否已开启"""
+    return _task_exists(AUTOSTART_TASK)
+
+
+def set_autostart(enable):
+    """开启/关闭登录级自启。免管理员。返回 (ok, 说明)
+
+    说明：计划任务的 /tr 命令里若含空格，需用引号包住可执行文件路径，
+    daemon_command() 已处理。/delay 0000:00 显式取消 Windows 默认的启动延迟。
+    """
+    if not enable:
+        _task_delete(AUTOSTART_TASK)
+        _cleanup_legacy_run_key()
+        return (not _task_exists(AUTOSTART_TASK)), "已关闭开机自启"
+    _cleanup_legacy_run_key()
+    cmd = ["schtasks", "/create", "/tn", AUTOSTART_TASK,
+           "/tr", daemon_command(), "/sc", "ONLOGON", "/delay", "0000:00", "/f"]
+    rc, out = _run_cmd(cmd)
+    if rc != 0:
+        # 少数系统/语言环境下 /delay 参数写法不被接受，退化重试（不带 /delay）
+        rc, out = _run_cmd(["schtasks", "/create", "/tn", AUTOSTART_TASK,
+                            "/tr", daemon_command(), "/sc", "ONLOGON", "/f"])
+    return rc == 0, out
+
+
+def boot_task_enabled():
+    """开机级自启（需管理员）是否已开启"""
+    return _task_exists(BOOT_TASK)
+
+
+def set_boot_task(enable):
+    """开启/关闭开机级自启：开机即启动、锁屏状态下也运行。
+
+    需要管理员权限；非管理员进程调用会返回失败，由调用方负责 runas 提权后重入。
+    用 /ru SYSTEM 而非存储用户密码：密码变更不会导致任务失效，也不用存明文口令。
+    返回 (ok, 说明)
+    """
+    if not enable:
+        _task_delete(BOOT_TASK)
+        return (not _task_exists(BOOT_TASK)), "已关闭极速启动"
+    if not is_admin():
+        return False, "需要管理员权限"
+    cmd = ["schtasks", "/create", "/tn", BOOT_TASK, "/tr", daemon_command(),
+           "/sc", "ONSTART", "/ru", "SYSTEM", "/f"]
+    rc, out = _run_cmd(cmd)
+    if rc != 0:
+        return False, out
+    return True, "已开启极速启动（开机即运行，锁屏时也在后台）"
+
+
+def elevate_self(arg):
+    """以管理员身份重新启动本程序并带上指定参数（UAC 提权）。
+    返回 True 表示已成功发起提权请求（调用方随后应自行退出）。"""
+    try:
+        import ctypes
+        if getattr(sys, "frozen", False):
+            exe, params = sys.executable, arg
+        else:
+            exe = sys.executable
+            # 源码模式：优先用 python.exe（pythonw 无控制台，UAC 提权后看不到回显）
+            py = os.path.join(os.path.dirname(exe), "python.exe")
+            if os.path.exists(py):
+                exe = py
+            params = '"%s" %s' % (os.path.join(APP_DIR, "gui.py"), arg)
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, APP_DIR, 1)
+        return rc > 32   # ShellExecute 返回值 >32 表示成功
+    except Exception:
+        return False
